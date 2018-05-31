@@ -1,1 +1,1 @@
-# php_disque
+# disque操作的c扩展
