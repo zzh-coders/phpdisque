@@ -13,9 +13,9 @@ dnl [  --with-php_disque             Include php_disque support])
 
 dnl Otherwise use enable:
 
-dnl PHP_ARG_ENABLE(php_disque, whether to enable php_disque support,
+PHP_ARG_ENABLE(php_disque, whether to enable php_disque support,
 dnl Make sure that the comment is aligned:
-dnl [  --enable-php_disque           Enable php_disque support])
+[  --enable-php_disque           Enable php_disque support])
 
 if test "$PHP_PHP_DISQUE" != "no"; then
   dnl Write more examples of tests here...
