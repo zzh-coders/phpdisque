@@ -25,6 +25,7 @@ extern zend_module_entry php_disque_module_entry;
 #define phpext_php_disque_ptr &php_disque_module_entry
 
 #define PHP_DISQUE_VERSION "develop" /* Replace with version number for your extension */
+#define _NL "\r\n"
 
 typedef struct fold_item {
     zval *(*fun)(INTERNAL_FUNCTION_PARAMETERS, void *, ...);
@@ -45,12 +46,14 @@ typedef struct {
     int failed;
     int status;
     int persistent;
-    int watching;
     zend_string *persistent_id;
-
+    short          mode;
     fold_item *head;
     fold_item *current;
 
+    int            serializer;
+    int            compression;
+    int            watching;
     char *pipeline_cmd;
     size_t pipeline_len;
 
@@ -148,4 +151,105 @@ PHP_DISQUE_API DisqueSock *disque_sock_get(zval *id TSRMLS_DC, int no_throw);
 
 PHP_DISQUE_API DisqueSock *disque_sock_get_connected(INTERNAL_FUNCTION_PARAMETERS);
 
+#define DISQUE_STREAM_CLOSE_MARK_FAILED(disque_sock) \
+    disque_stream_close(disque_sock TSRMLS_CC); \
+    disque_sock->stream = NULL; \
+    disque_sock->mode = ATOMIC; \
+    disque_sock->status = DISQUE_SOCK_STATUS_FAILED;\
+    disque_sock->watching = 0
+
+#define IS_PIPELINE(disque_sock) (disque_sock->mode & PIPELINE)
+
+#define PIPELINE_ENQUEUE_COMMAND(cmd, cmd_len) do { \
+    if (disque_sock->pipeline_cmd == NULL) { \
+        disque_sock->pipeline_cmd = estrndup(cmd, cmd_len); \
+    } else { \
+        disque_sock->pipeline_cmd = erealloc(disque_sock->pipeline_cmd, \
+            disque_sock->pipeline_len + cmd_len); \
+        memcpy(&disque_sock->pipeline_cmd[disque_sock->pipeline_len], \
+            cmd, cmd_len); \
+    } \
+    disque_sock->pipeline_len += cmd_len; \
+} while (0)
+
+#define SOCKET_WRITE_COMMAND(disque_sock, cmd, cmd_len) \
+    if(disque_sock_write(disque_sock, cmd, cmd_len TSRMLS_CC) < 0) { \
+    efree(cmd); \
+    RETURN_FALSE; \
+}
+#define DISQUE_PROCESS_REQUEST(disque_sock, cmd, cmd_len) \
+    if (IS_PIPELINE(disque_sock)) { \
+        PIPELINE_ENQUEUE_COMMAND(cmd, cmd_len); \
+    } else { \
+        SOCKET_WRITE_COMMAND(disque_sock, cmd, cmd_len); \
+    } \
+    efree(cmd);
+
+#define DISQUE_PROCESS_KW_CMD(kw, cmdfunc, resp_func) \
+    DisqueSock *disque_sock; char *cmd; int cmd_len; void *ctx=NULL; \
+    if ((disque_sock = disque_sock_get(getThis() TSRMLS_CC, 0)) == NULL || \
+       cmdfunc(INTERNAL_FUNCTION_PARAM_PASSTHRU, disque_sock, kw, &cmd, \
+               &cmd_len, NULL, &ctx)==FAILURE) { \
+            RETURN_FALSE; \
+    } \
+    DISQUE_PROCESS_REQUEST(disque_sock, cmd, cmd_len); \
+    resp_func(INTERNAL_FUNCTION_PARAM_PASSTHRU, disque_sock, NULL, ctx); \
+
+
+#define ATOMIC   0
+#define MULTI    1
+#define PIPELINE 2
+#define IS_ATOMIC(disque_sock) (disque_sock->mode == ATOMIC)
+
+/* serializers */
+#define DISQUE_SERIALIZER_NONE        0
+#define DISQUE_SERIALIZER_PHP         1
+#define DISQUE_SERIALIZER_IGBINARY    2
+/* compression */
+#define DISQUE_COMPRESSION_NONE 0
+#define DISQUE_COMPRESSION_LZF  1
+
+#define DISQUE_CMD_SPPRINTF(ret, kw, fmt, ...) \
+    disque_spprintf(disque_sock, slot TSRMLS_CC, ret, kw, fmt, ##__VA_ARGS__)
+PHP_DISQUE_API int
+disque_spprintf(DisqueSock *disque_sock, short *slot TSRMLS_DC, char **ret, char *kw, char *fmt, ...);
+int disque_cmd_init_sstr(smart_string *str, int num_args, char *keyword, int keyword_len);
+int disque_cmd_append_sstr(smart_string *str, char *append, int append_len);
+int disque_cmd_append_sstr_int(smart_string *str, int append);
+int disque_cmd_append_sstr_long(smart_string *str, long append);
+int
+disque_cmd_append_sstr_dbl(smart_string *str, double value);
+PHP_DISQUE_API int
+disque_sock_write(DisqueSock *disque_sock, char *cmd, size_t sz TSRMLS_DC);
+PHP_DISQUE_API void disque_stream_close(DisqueSock *disque_sock TSRMLS_DC);
+
+PHP_DISQUE_API int
+disque_check_eof(DisqueSock *disque_sock, int no_throw TSRMLS_DC);
+PHP_DISQUE_API int
+disque_sock_gets(DisqueSock *disque_sock, char *buf, int buf_size,
+                 size_t *line_size TSRMLS_DC);
+PHP_DISQUE_API char *
+disque_sock_read_bulk_reply(DisqueSock *disque_sock, int bytes TSRMLS_DC);
+PHP_DISQUE_API char *
+disque_sock_read(DisqueSock *disque_sock, int *buf_len TSRMLS_DC);
+PHP_DISQUE_API int disque_pack(DisqueSock *disque_sock, zval *z, char **val, strlen_t *val_len TSRMLS_DC);
+
+PHP_DISQUE_API int disque_unpack(DisqueSock *disque_sock, const char *val, int val_len, zval *z_ret TSRMLS_DC);
+PHP_DISQUE_API int disque_serialize(DisqueSock *disque_sock, zval *z, char **val, strlen_t *val_len
+                                    TSRMLS_DC);
+PHP_DISQUE_API int
+disque_unserialize(DisqueSock *disque_sock, const char *val, int val_len,
+                   zval *z_ret TSRMLS_DC);
+
+PHP_DISQUE_API void disque_debug_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
+                                          zval *z_tab, void *ctx);
+PHP_DISQUE_API void
+disque_string_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab, void *ctx);
+
+int disque_str_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw,
+                   char **cmd, int *cmd_len, short *slot, void **ctx);
+
+int disque_empty_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
+                     char *kw, char **cmd, int *cmd_len, short *slot,
+                     void **ctx);
 #endif    /* PHP_DISQUE_H */

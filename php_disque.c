@@ -24,6 +24,8 @@
 
 #include "php.h"
 #include "php_ini.h"
+#include <ext/standard/php_var.h>
+#include <ext/standard/php_math.h>
 #include "ext/standard/info.h"
 
 #include "php_disque.h"
@@ -31,6 +33,7 @@
 
 #include "php_network.h"
 #include <sys/types.h>
+#include <ext/standard/php_rand.h>
 
 zend_class_entry *disque_ce;
 zend_class_entry *disque_exception_ce;
@@ -424,6 +427,10 @@ PHP_DISQUE_API DisqueSock *disque_sock_create(char *host, int host_len, unsigned
     disque_sock->timeout = timeout;
     disque_sock->read_timeout = read_timeout;
 
+    disque_sock->serializer = DISQUE_SERIALIZER_NONE;
+    disque_sock->compression = DISQUE_COMPRESSION_NONE;
+    disque_sock->mode = ATOMIC;
+
     disque_sock->head = NULL;
     disque_sock->current = NULL;
 
@@ -489,6 +496,724 @@ PHP_DISQUE_API DisqueSock *disque_sock_get_connected(INTERNAL_FUNCTION_PARAMETER
     return disque_sock;
 }
 
+union resparg {
+    char *str;
+    zend_string *zstr;
+    zval *zv;
+    int ival;
+    long lval;
+    double dval;
+};
+
+/* A printf like method to construct a Redis RESP command.  It has been extended
+ * to take a few different format specifiers that are convienient to phpredis.
+ *
+ * s - C string followed by length as a strlen_t
+ * S - Pointer to a zend_string
+ * k - Same as 's' but the value will be prefixed if phpredis is set up do do
+ *     that and the working slot will be set if it has been passed.
+ * v - A z_val which will be serialized if phpredis is configured to serialize.
+ * f - A double value
+ * F - Alias to 'f'
+ * i - An integer
+ * d - Alias to 'i'
+ * l - A long
+ * L - Alias to 'l'
+ */
+PHP_DISQUE_API int
+disque_spprintf(DisqueSock *disque_sock, short *slot TSRMLS_DC, char **ret, char *kw, char *fmt, ...) {
+    smart_string cmd = {0};
+    va_list ap;
+    union resparg arg;
+    char *dup;
+    int argfree;
+    strlen_t arglen;
+
+    va_start(ap, fmt);
+
+    /* Header */
+    disque_cmd_init_sstr(&cmd, strlen(fmt), kw, strlen(kw));
+
+    while (*fmt) {
+        switch (*fmt) {
+            case 's':
+                arg.str = va_arg(ap, char*);
+                arglen = va_arg(ap, strlen_t);
+                disque_cmd_append_sstr(&cmd, arg.str, arglen);
+                break;
+            case 'S':
+                arg.zstr = va_arg(ap, zend_string *);
+                disque_cmd_append_sstr(&cmd, ZSTR_VAL(arg.zstr), ZSTR_LEN(arg.zstr));
+                break;
+//            case 'k':
+//                arg.str = va_arg(ap, char*);
+//                arglen = va_arg(ap, strlen_t);
+//                argfree = disque_key_prefix(disque_sock, &arg.str, &arglen);
+//                disque_cmd_append_sstr(&cmd, arg.str, arglen);
+//                if (argfree) efree(arg.str);
+//                break;
+            case 'v':
+                arg.zv = va_arg(ap, zval*);
+                argfree = disque_pack(disque_sock, arg.zv, &dup, &arglen TSRMLS_CC);
+                disque_cmd_append_sstr(&cmd, dup, arglen);
+                if (argfree) efree(dup);
+                break;
+            case 'f':
+            case 'F':
+                arg.dval = va_arg(ap, double);
+                disque_cmd_append_sstr_dbl(&cmd, arg.dval);
+                break;
+            case 'i':
+            case 'd':
+                arg.ival = va_arg(ap, int);
+                disque_cmd_append_sstr_int(&cmd, arg.ival);
+                break;
+            case 'l':
+            case 'L':
+                arg.lval = va_arg(ap, long);
+                disque_cmd_append_sstr_long(&cmd, arg.lval);
+                break;
+        }
+
+        fmt++;
+    }
+    /* varargs cleanup */
+    va_end(ap);
+
+    /* Null terminate */
+    smart_string_0(&cmd);
+
+    /* Push command string, return length */
+    *ret = cmd.c;
+    return cmd.len;
+}
+
+/*
+ * Given a smart string, number of arguments, a keyword, and the length of the keyword
+ * initialize our smart string with the proper Redis header for the command to follow
+ */
+int disque_cmd_init_sstr(smart_string *str, int num_args, char *keyword, int keyword_len) {
+    smart_string_appendc(str, '*');
+    smart_string_append_long(str, num_args + 1);
+    smart_string_appendl(str, _NL, sizeof(_NL) - 1);
+    smart_string_appendc(str, '$');
+    smart_string_append_long(str, keyword_len);
+    smart_string_appendl(str, _NL, sizeof(_NL) - 1);
+    smart_string_appendl(str, keyword, keyword_len);
+    smart_string_appendl(str, _NL, sizeof(_NL) - 1);
+    return str->len;
+}
+
+/*
+ * Append a command sequence to a smart_string
+ */
+int disque_cmd_append_sstr(smart_string *str, char *append, int append_len) {
+    smart_string_appendc(str, '$');
+    smart_string_append_long(str, append_len);
+    smart_string_appendl(str, _NL, sizeof(_NL) - 1);
+    smart_string_appendl(str, append, append_len);
+    smart_string_appendl(str, _NL, sizeof(_NL) - 1);
+
+    /* Return our new length */
+    return str->len;
+}
+
+/*
+ * Append an integer to a smart string command
+ */
+int disque_cmd_append_sstr_int(smart_string *str, int append) {
+    char int_buf[32];
+    int int_len = snprintf(int_buf, sizeof(int_buf), "%d", append);
+    return disque_cmd_append_sstr(str, int_buf, int_len);
+}
+
+/*
+ * Append a long to a smart string command
+ */
+int disque_cmd_append_sstr_long(smart_string *str, long append) {
+    char long_buf[32];
+    int long_len = snprintf(long_buf, sizeof(long_buf), "%ld", append);
+    return disque_cmd_append_sstr(str, long_buf, long_len);
+}
+
+/*
+ * Append a double to a smart string command
+ */
+int
+disque_cmd_append_sstr_dbl(smart_string *str, double value) {
+    char tmp[64];
+    int len, retval;
+
+    /* Convert to string */
+    len = snprintf(tmp, sizeof(tmp), "%.16g", value);
+
+    // Append the string
+    retval = disque_cmd_append_sstr(str, tmp, len);
+
+    /* Return new length */
+    return retval;
+}
+
+PHP_DISQUE_API int
+disque_sock_write(DisqueSock *disque_sock, char *cmd, size_t sz TSRMLS_DC) {
+    if (!disque_sock || disque_sock->status == DISQUE_SOCK_STATUS_DISCONNECTED) {
+        zend_throw_exception(disque_exception_ce, "Connection closed",
+                             0 TSRMLS_CC);
+    } else if (disque_check_eof(disque_sock, 0 TSRMLS_CC) == 0 &&
+               php_stream_write(disque_sock->stream, cmd, sz) == sz
+            ) {
+        return sz;
+    }
+    return -1;
+}
+
+static int resend_auth(DisqueSock *disque_sock TSRMLS_DC) {
+    char *cmd, *response;
+    int cmd_len, response_len;
+
+    cmd_len = disque_spprintf(disque_sock, NULL TSRMLS_CC, &cmd, "AUTH", "s",
+                              ZSTR_VAL(disque_sock->auth), ZSTR_LEN(disque_sock->auth));
+
+    if (disque_sock_write(disque_sock, cmd, cmd_len TSRMLS_CC) < 0) {
+        efree(cmd);
+        return -1;
+    }
+
+    efree(cmd);
+
+    response = disque_sock_read(disque_sock, &response_len TSRMLS_CC);
+    if (response == NULL) {
+        return -1;
+    }
+
+    if (strncmp(response, "+OK", 3)) {
+        efree(response);
+        return -1;
+    }
+
+    efree(response);
+    return 0;
+}
+
+static void
+disque_error_throw(DisqueSock *disque_sock TSRMLS_DC) {
+    if (disque_sock != NULL && disque_sock->err != NULL &&
+        memcmp(ZSTR_VAL(disque_sock->err), "ERR", sizeof("ERR") - 1) != 0 &&
+        memcmp(ZSTR_VAL(disque_sock->err), "NOSCRIPT", sizeof("NOSCRIPT") - 1) != 0 &&
+        memcmp(ZSTR_VAL(disque_sock->err), "WRONGTYPE", sizeof("WRONGTYPE") - 1) != 0
+            ) {
+        zend_throw_exception(disque_exception_ce, ZSTR_VAL(disque_sock->err), 0 TSRMLS_CC);
+    }
+}
+
+PHP_DISQUE_API void disque_stream_close(DisqueSock *disque_sock TSRMLS_DC) {
+    if (!disque_sock->persistent) {
+        php_stream_close(disque_sock->stream);
+    } else {
+        php_stream_pclose(disque_sock->stream);
+    }
+}
+
+PHP_DISQUE_API int
+disque_check_eof(DisqueSock *disque_sock, int no_throw TSRMLS_DC) {
+    int count;
+
+    if (!disque_sock->stream) {
+        return -1;
+    }
+
+    /* NOITCE: set errno = 0 here
+     *
+     * There is a bug in php socket stream to check liveness of a connection:
+     * if (0 >= recv(sock->socket, &buf, sizeof(buf), MSG_PEEK) && php_socket_errno() != EWOULDBLOCK) {
+     *    alive = 0;
+     * }
+     * If last errno is EWOULDBLOCK and recv returns 0 because of connection closed, alive would not be
+     * set to 0. However, the connection is close indeed. The php_stream_eof is not reliable. This will
+     * cause a "read error on connection" exception when use a closed persistent connection.
+     *
+     * We work around this by set errno = 0 first.
+     *
+     * Bug fix of php: https://github.com/php/php-src/pull/1456
+     * */
+    errno = 0;
+    if (php_stream_eof(disque_sock->stream) == 0) {
+        /* Success */
+        return 0;
+    }
+    /* TODO: configurable max retry count */
+    for (count = 0; count < 10; ++count) {
+        /* close existing stream before reconnecting */
+        if (disque_sock->stream) {
+            disque_stream_close(disque_sock TSRMLS_CC);
+            disque_sock->stream = NULL;
+        }
+        // Wait for a while before trying to reconnect
+        if (disque_sock->retry_interval) {
+            // Random factor to avoid having several (or many) concurrent connections trying to reconnect at the same time
+            long retry_interval = (count ? disque_sock->retry_interval : (php_rand(TSRMLS_C) %
+                                                                          disque_sock->retry_interval));
+            usleep(retry_interval);
+        }
+        /* reconnect */
+        if (disque_sock_connect(disque_sock TSRMLS_CC) == 0) {
+            /* check for EOF again. */
+            errno = 0;
+            if (php_stream_eof(disque_sock->stream) == 0) {
+                /* If we're using a password, attempt a reauthorization */
+                if (disque_sock->auth && resend_auth(disque_sock TSRMLS_CC) != 0) {
+                    break;
+                }
+                /* Success */
+                return 0;
+            }
+        }
+    }
+    /* close stream if still here */
+    if (disque_sock->stream) {
+        DISQUE_STREAM_CLOSE_MARK_FAILED(disque_sock);
+    }
+    if (!no_throw) {
+        zend_throw_exception(disque_exception_ce, "Connection lost", 0 TSRMLS_CC);
+    }
+    return -1;
+}
+
+PHP_DISQUE_API int
+disque_sock_gets(DisqueSock *disque_sock, char *buf, int buf_size,
+                 size_t *line_size TSRMLS_DC) {
+    // Handle EOF
+    if (-1 == disque_check_eof(disque_sock, 0 TSRMLS_CC)) {
+        return -1;
+    }
+
+    if (php_stream_get_line(disque_sock->stream, buf, buf_size, line_size)
+        == NULL) {
+        // Close, put our socket state into error
+        DISQUE_STREAM_CLOSE_MARK_FAILED(disque_sock);
+
+        // Throw a read error exception
+        zend_throw_exception(disque_exception_ce, "read error on connection",
+                             0 TSRMLS_CC);
+        return -1;
+    }
+
+    /* We don't need \r\n */
+    *line_size -= 2;
+    buf[*line_size] = '\0';
+
+    /* Success! */
+    return 0;
+}
+
+
+PHP_DISQUE_API char *
+disque_sock_read_bulk_reply(DisqueSock *disque_sock, int bytes TSRMLS_DC) {
+    int offset = 0;
+    char *reply, c[2];
+    size_t got;
+
+    if (-1 == bytes || -1 == disque_check_eof(disque_sock, 0 TSRMLS_CC)) {
+        return NULL;
+    }
+
+    /* Allocate memory for string */
+    reply = emalloc(bytes + 1);
+
+    /* Consume bulk string */
+    while (offset < bytes) {
+        got = php_stream_read(disque_sock->stream, reply + offset, bytes - offset);
+        if (got == 0) break;
+        offset += got;
+    }
+
+    /* Protect against reading too few bytes */
+    if (offset < bytes) {
+        /* Error or EOF */
+        zend_throw_exception(disque_exception_ce,
+                             "socket error on read socket", 0 TSRMLS_CC);
+        efree(reply);
+        return NULL;
+    }
+
+    /* Consume \r\n and null terminate reply string */
+    php_stream_read(disque_sock->stream, c, 2);
+    reply[bytes] = '\0';
+
+    return reply;
+}
+
+PHP_DISQUE_API char *
+disque_sock_read(DisqueSock *disque_sock, int *buf_len TSRMLS_DC) {
+    char inbuf[4096];
+    size_t len;
+
+    *buf_len = 0;
+    if (disque_sock_gets(disque_sock, inbuf, sizeof(inbuf) - 1, &len TSRMLS_CC) < 0) {
+        return NULL;
+    }
+
+    switch (inbuf[0]) {
+        case '-':
+            disque_sock_set_err(disque_sock, inbuf + 1, len);
+
+            /* Filter our ERROR through the few that should actually throw */
+            disque_error_throw(disque_sock TSRMLS_CC);
+
+            return NULL;
+        case '$':
+            *buf_len = atoi(inbuf + 1);
+            return disque_sock_read_bulk_reply(disque_sock, *buf_len TSRMLS_CC);
+
+        case '*':
+            /* For null multi-bulk replies (like timeouts from brpoplpush): */
+            if (memcmp(inbuf + 1, "-1", 2) == 0) {
+                return NULL;
+            }
+            /* fall through */
+
+        case '+':
+        case ':':
+            /* Single Line Reply */
+            /* +OK or :123 */
+            if (len > 1) {
+                *buf_len = len;
+                return estrndup(inbuf, *buf_len);
+            }
+        default:
+            zend_throw_exception_ex(
+                    disque_exception_ce,
+                    0 TSRMLS_CC,
+                    "protocol error, got '%c' as reply type byte\n",
+                    inbuf[0]
+            );
+    }
+
+    return NULL;
+}
+
+PHP_DISQUE_API int disque_pack(DisqueSock *disque_sock, zval *z, char **val, strlen_t *val_len TSRMLS_DC) {
+    char *buf, *data;
+    int valfree;
+    strlen_t len;
+    uint32_t res;
+
+    valfree = disque_serialize(disque_sock, z, &buf, &len TSRMLS_CC);
+    switch (disque_sock->compression) {
+        case DISQUE_COMPRESSION_LZF:
+#ifdef HAVE_REDIS_LZF
+            data = emalloc(len);
+            res = lzf_compress(buf, len, data, len - 1);
+            if (res > 0 && res < len) {
+                if (valfree) efree(buf);
+                *val = data;
+                *val_len = res;
+                 return 1;
+            }
+            efree(data);
+#endif
+            break;
+    }
+    *val = buf;
+    *val_len = len;
+    return valfree;
+}
+
+PHP_DISQUE_API int disque_unpack(DisqueSock *disque_sock, const char *val, int val_len, zval *z_ret TSRMLS_DC) {
+    char *data;
+    int i;
+    uint32_t res;
+
+    switch (disque_sock->compression) {
+        case DISQUE_COMPRESSION_LZF:
+#ifdef HAVE_REDIS_LZF
+            errno = E2BIG;
+            /* start from two-times bigger buffer and
+             * increase it exponentially  if needed */
+            for (i = 2; errno == E2BIG; i *= 2) {
+                data = emalloc(i * val_len);
+                if ((res = lzf_decompress(val, val_len, data, i * val_len)) == 0) {
+                    /* errno != E2BIG will brake for loop */
+                    efree(data);
+                    continue;
+                } else if (redis_unserialize(redis_sock, data, res, z_ret TSRMLS_CC) == 0) {
+                    ZVAL_STRINGL(z_ret, data, res);
+                }
+                efree(data);
+                return 1;
+            }
+#endif
+            break;
+    }
+    return disque_unserialize(disque_sock, val, val_len, z_ret TSRMLS_CC);
+}
+
+PHP_DISQUE_API int disque_serialize(DisqueSock *disque_sock, zval *z, char **val, strlen_t *val_len
+                                    TSRMLS_DC) {
+#if ZEND_MODULE_API_NO >= 20100000
+    php_serialize_data_t ht;
+#else
+    HashTable ht;
+#endif
+    smart_str sstr = {0};
+#ifdef HAVE_REDIS_IGBINARY
+    size_t sz;
+    uint8_t *val8;
+#endif
+
+    *val = NULL;
+    *val_len = 0;
+    switch (disque_sock->serializer) {
+        case DISQUE_SERIALIZER_NONE:
+            switch (Z_TYPE_P(z)) {
+
+                case IS_STRING:
+                    *val = Z_STRVAL_P(z);
+                    *val_len = Z_STRLEN_P(z);
+                    break;
+
+                case IS_OBJECT:
+                    *val = "Object";
+                    *val_len = 6;
+                    break;
+
+                case IS_ARRAY:
+                    *val = "Array";
+                    *val_len = 5;
+                    break;
+
+                default: { /* copy */
+                    zend_string * zstr = zval_get_string(z);
+                    *val = estrndup(ZSTR_VAL(zstr), ZSTR_LEN(zstr));
+                    *val_len = ZSTR_LEN(zstr);
+                    zend_string_release(zstr);
+                    return 1;
+                }
+            }
+            break;
+        case DISQUE_SERIALIZER_PHP:
+
+#if ZEND_MODULE_API_NO >= 20100000
+            PHP_VAR_SERIALIZE_INIT(ht);
+#else
+            zend_hash_init(&ht, 10, NULL, NULL, 0);
+#endif
+            php_var_serialize(&sstr, z, &ht);
+#if (PHP_MAJOR_VERSION < 7)
+        *val = estrndup(sstr.c, sstr.len);
+            *val_len = sstr.len;
+#else
+            *val = estrndup(ZSTR_VAL(sstr.s), ZSTR_LEN(sstr.s));
+            *val_len = ZSTR_LEN(sstr.s);
+#endif
+            smart_str_free(&sstr);
+#if ZEND_MODULE_API_NO >= 20100000
+            PHP_VAR_SERIALIZE_DESTROY(ht);
+#else
+            zend_hash_destroy(&ht);
+#endif
+
+            return 1;
+
+        case DISQUE_SERIALIZER_IGBINARY:
+#ifdef HAVE_REDIS_IGBINARY
+            if(igbinary_serialize(&val8, (size_t *)&sz, z TSRMLS_CC) == 0) {
+                *val = (char*)val8;
+                *val_len = sz;
+                return 1;
+            }
+#endif
+            break;
+    }
+    return 0;
+}
+
+PHP_DISQUE_API int
+disque_unserialize(DisqueSock *disque_sock, const char *val, int val_len,
+                   zval *z_ret TSRMLS_DC) {
+
+    php_unserialize_data_t var_hash;
+    int ret = 0;
+
+    switch (disque_sock->serializer) {
+        case DISQUE_SERIALIZER_PHP:
+#if ZEND_MODULE_API_NO >= 20100000
+            PHP_VAR_UNSERIALIZE_INIT(var_hash);
+#else
+            memset(&var_hash, 0, sizeof(var_hash));
+#endif
+            if (php_var_unserialize(z_ret, (const unsigned char **) &val,
+                                    (const unsigned char *) val + val_len, &var_hash)
+                    ) {
+                ret = 1;
+            }
+#if ZEND_MODULE_API_NO >= 20100000
+            PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+#else
+            var_destroy(&var_hash);
+#endif
+            break;
+
+        case DISQUE_SERIALIZER_IGBINARY:
+#ifdef HAVE_REDIS_IGBINARY
+            /*
+             * Check if the given string starts with an igbinary header.
+             *
+             * A modern igbinary string consists of the following format:
+             *
+             * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-
+             * | header (4) | type (1) | ... (n) |  NUL (1) |
+             * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-
+             *
+             * With header being either 0x00000001 or 0x00000002
+             * (encoded as big endian).
+             *
+             * Not all versions contain the trailing NULL byte though, so
+             * do not check for that.
+             */
+            if (val_len < 5
+                    || (memcmp(val, "\x00\x00\x00\x01", 4) != 0
+                    && memcmp(val, "\x00\x00\x00\x02", 4) != 0))
+            {
+                /* This is most definitely not an igbinary string, so do
+                   not try to unserialize this as one. */
+                break;
+            }
+
+#if (PHP_MAJOR_VERSION < 7)
+            INIT_PZVAL(z_ret);
+            ret = !igbinary_unserialize((const uint8_t *)val, (size_t)val_len, &z_ret TSRMLS_CC);
+#else
+            ret = !igbinary_unserialize((const uint8_t *)val, (size_t)val_len, z_ret TSRMLS_CC);
+#endif
+
+#endif
+            break;
+    }
+    return ret;
+}
+
+PHP_DISQUE_API void
+disque_string_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab, void *ctx) {
+
+    char *response;
+    int response_len;
+
+    if ((response = disque_sock_read(disque_sock, &response_len TSRMLS_CC))
+        == NULL) {
+        if (IS_ATOMIC(disque_sock)) {
+            RETURN_FALSE;
+        }
+        add_next_index_bool(z_tab, 0);
+        return;
+    }
+    if (IS_ATOMIC(disque_sock)) {
+        if (!disque_unpack(disque_sock, response, response_len, return_value TSRMLS_CC)) {
+            RETVAL_STRINGL(response, response_len);
+        }
+    } else {
+        zval zv, *z = &zv;
+        if (disque_unpack(disque_sock, response, response_len, z TSRMLS_CC)) {
+#if (PHP_MAJOR_VERSION < 7)
+            MAKE_STD_ZVAL(z);
+            *z = zv;
+#endif
+            add_next_index_zval(z_tab, z);
+        } else {
+            add_next_index_stringl(z_tab, response, response_len);
+        }
+    }
+    efree(response);
+}
+
+PHP_DISQUE_API void disque_debug_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
+                                        zval *z_tab, void *ctx)
+{
+    char *resp, *p, *p2, *p3, *p4;
+    int is_numeric,  resp_len;
+
+    /* Add or return false if we can't read from the socket */
+    if((resp = disque_sock_read(disque_sock, &resp_len TSRMLS_CC))==NULL) {
+        if (IS_ATOMIC(disque_sock)) {
+            RETURN_FALSE;
+        }
+        add_next_index_bool(z_tab, 0);
+        return;
+    }
+
+    zval zv, *z_result = &zv;
+#if (PHP_MAJOR_VERSION < 7)
+    MAKE_STD_ZVAL(z_result);
+#endif
+    array_init(z_result);
+
+    /* Skip the '+' */
+    p = resp + 1;
+
+    /* <info>:<value> <info2:value2> ... */
+    while((p2 = strchr(p, ':'))!=NULL) {
+        /* Null terminate at the ':' */
+        *p2++ = '\0';
+
+        /* Null terminate at the space if we have one */
+        if((p3 = strchr(p2, ' '))!=NULL) {
+            *p3++ = '\0';
+        } else {
+            p3 = resp + resp_len;
+        }
+
+        is_numeric = 1;
+        for(p4=p2; *p4; ++p4) {
+            if(*p4 < '0' || *p4 > '9') {
+                is_numeric = 0;
+                break;
+            }
+        }
+
+        /* Add our value */
+        if(is_numeric) {
+            add_assoc_long(z_result, p, atol(p2));
+        } else {
+            add_assoc_string(z_result, p, p2);
+        }
+
+        p = p3;
+    }
+
+    efree(resp);
+
+    if (IS_ATOMIC(disque_sock)) {
+        RETVAL_ZVAL(z_result, 0, 1);
+    } else {
+        add_next_index_zval(z_tab, z_result);
+    }
+}
+
+
+int disque_str_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw,
+                   char **cmd, int *cmd_len, short *slot, void **ctx) {
+    char *arg;
+    strlen_t arg_len;
+
+    // Parse args
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &arg, &arg_len)
+        == FAILURE) {
+        return FAILURE;
+    }
+
+    // Build the command without molesting the string
+    *cmd_len = DISQUE_CMD_SPPRINTF(cmd, kw, "s", arg, arg_len);
+
+    return SUCCESS;
+}
+
+int disque_empty_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
+                    char *kw, char **cmd, int *cmd_len, short *slot,
+                    void **ctx)
+{
+    *cmd_len = DISQUE_CMD_SPPRINTF(cmd, kw, "");
+    return SUCCESS;
+}
 
 PHP_METHOD (Disque, __construct) {
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "") == FAILURE) {
@@ -512,7 +1237,7 @@ PHP_METHOD (Disque, close) {
 }
 
 PHP_METHOD (Disque, hello) {
-    php_printf("这是hello方法");
+    DISQUE_PROCESS_KW_CMD("HELLO", disque_empty_cmd, disque_debug_response);
 }
 
 PHP_METHOD (Disque, connect) {
