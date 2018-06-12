@@ -10,12 +10,15 @@ echo "Functions available in the test extension:$br\n";
 foreach($functions as $func) {
     echo $func."$br\n";
 }
-echo "$br\n";
-$function = 'confirm_' . $module . '_compiled';
-if (extension_loaded($module)) {
-	$str = $function($module);
-} else {
-	$str = "Module $module is not compiled into PHP";
+
+$disque = new Disque();
+try{
+	$disque->connect('127.0.0.1',7711,3);
+}catch(DisqueException $e){
+	echo $e->getMessage();
+	exit();
 }
-echo "$str\n";
+$disque->hello();
+
+$disque->close();
 ?>
