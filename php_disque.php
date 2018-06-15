@@ -12,7 +12,7 @@ try{
 	echo $e->getMessage();
 	exit();
 }
-$info = $disque->hello();
-var_dump($info);
+var_dump($disque->ping());
+var_dump($disque->hello());
 $disque->close();
 ?>

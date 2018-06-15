@@ -63,6 +63,7 @@ static zend_function_entry php_disque_functions[] = {
         PHP_ME(Disque, pconnect, arginfo_pconnect, ZEND_ACC_DTOR | ZEND_ACC_PUBLIC)
         PHP_ME(Disque, close, arginfo_void, ZEND_ACC_CTOR | ZEND_ACC_PUBLIC)
         PHP_ME(Disque, hello, arginfo_void, ZEND_ACC_DTOR | ZEND_ACC_PUBLIC)
+        PHP_ME(Disque, ping, arginfo_void, ZEND_ACC_PUBLIC)
         PHP_FE_END
 };
 
@@ -553,7 +554,7 @@ disque_spprintf(DisqueSock *disque_sock, short *slot TSRMLS_DC, char **ret, char
 //                if (argfree) efree(arg.str);
 //                break;
             case 'v':
-                arg.zv = va_arg(ap, zval*);
+                arg.zv = va_arg(ap, zval *);
                 argfree = disque_pack(disque_sock, arg.zv, &dup, &arglen TSRMLS_CC);
                 disque_cmd_append_sstr(&cmd, dup, arglen);
                 if (argfree) efree(dup);
@@ -870,8 +871,6 @@ disque_sock_read(DisqueSock *disque_sock, int *buf_len TSRMLS_DC) {
             if (memcmp(inbuf + 1, "-1", 2) == 0) {
                 return NULL;
             }
-            /* fall through */
-
         case '+':
         case ':':
             /* Single Line Reply */
@@ -1094,6 +1093,29 @@ disque_unserialize(DisqueSock *disque_sock, const char *val, int val_len,
 }
 
 PHP_DISQUE_API void
+disque_ping_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
+                     zval *z_tab, void *ctx) {
+
+    char *response;
+    int response_len;
+
+    if ((response = disque_sock_read(disque_sock, &response_len TSRMLS_CC))
+        == NULL) {
+        if (IS_ATOMIC(disque_sock)) {
+            RETURN_FALSE;
+        }
+        add_next_index_bool(z_tab, 0);
+        return;
+    }
+    if (IS_ATOMIC(disque_sock)) {
+        RETVAL_STRINGL(response, response_len);
+    } else {
+        add_next_index_stringl(z_tab, response, response_len);
+    }
+    efree(response);
+}
+
+PHP_DISQUE_API void
 disque_string_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab, void *ctx) {
 
     char *response;
@@ -1126,70 +1148,6 @@ disque_string_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zv
     efree(response);
 }
 
-PHP_DISQUE_API void disque_debug_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
-                                        zval *z_tab, void *ctx)
-{
-    char *resp, *p, *p2, *p3, *p4;
-    int is_numeric,  resp_len;
-
-    /* Add or return false if we can't read from the socket */
-    if((resp = disque_sock_read(disque_sock, &resp_len TSRMLS_CC))==NULL) {
-        if (IS_ATOMIC(disque_sock)) {
-            RETURN_FALSE;
-        }
-        add_next_index_bool(z_tab, 0);
-        return;
-    }
-
-    zval zv, *z_result = &zv;
-#if (PHP_MAJOR_VERSION < 7)
-    MAKE_STD_ZVAL(z_result);
-#endif
-    array_init(z_result);
-
-    /* Skip the '+' */
-    p = resp + 1;
-
-    /* <info>:<value> <info2:value2> ... */
-    while((p2 = strchr(p, ':'))!=NULL) {
-        /* Null terminate at the ':' */
-        *p2++ = '\0';
-
-        /* Null terminate at the space if we have one */
-        if((p3 = strchr(p2, ' '))!=NULL) {
-            *p3++ = '\0';
-        } else {
-            p3 = resp + resp_len;
-        }
-
-        is_numeric = 1;
-        for(p4=p2; *p4; ++p4) {
-            if(*p4 < '0' || *p4 > '9') {
-                is_numeric = 0;
-                break;
-            }
-        }
-
-        /* Add our value */
-        if(is_numeric) {
-            add_assoc_long(z_result, p, atol(p2));
-        } else {
-            add_assoc_string(z_result, p, p2);
-        }
-
-        p = p3;
-    }
-
-    efree(resp);
-
-    if (IS_ATOMIC(disque_sock)) {
-        RETVAL_ZVAL(z_result, 0, 1);
-    } else {
-        add_next_index_zval(z_tab, z_result);
-    }
-}
-
-
 int disque_str_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw,
                    char **cmd, int *cmd_len, short *slot, void **ctx) {
     char *arg;
@@ -1208,11 +1166,241 @@ int disque_str_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *
 }
 
 int disque_empty_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
-                    char *kw, char **cmd, int *cmd_len, short *slot,
-                    void **ctx)
-{
+                     char *kw, char **cmd, int *cmd_len, short *slot,
+                     void **ctx) {
     *cmd_len = DISQUE_CMD_SPPRINTF(cmd, kw, "");
     return SUCCESS;
+}
+
+
+PHP_DISQUE_API void
+disque_info_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab, void *ctx) {
+    char *response;
+    int response_len;
+    zval zv = {{0}}, *z_ret = &zv;
+
+    /* Read bulk response */
+    if ((response = disque_sock_read(disque_sock, &response_len TSRMLS_CC)) == NULL) {
+        RETURN_FALSE;
+    }
+
+    /* Parse it into a zval array */
+    disque_parse_info_response(response, z_ret);
+
+    /* Free source response */
+    efree(response);
+
+    if (IS_ATOMIC(disque_sock)) {
+        RETVAL_ZVAL(z_ret, 0, 1);
+    } else {
+        add_next_index_zval(z_tab, z_ret);
+    }
+}
+
+PHP_DISQUE_API void disque_long_response(INTERNAL_FUNCTION_PARAMETERS,
+                                         DisqueSock *disque_sock, zval *z_tab,
+                                         void *ctx) {
+
+    char *response;
+    int response_len;
+
+    if ((response = disque_sock_read(disque_sock, &response_len TSRMLS_CC))
+        == NULL) {
+        if (IS_ATOMIC(disque_sock)) {
+            RETURN_FALSE;
+        }
+        add_next_index_bool(z_tab, 0);
+        return;
+    }
+
+    if (response[0] == ':') {
+#ifdef PHP_WIN32
+        __int64 ret = _atoi64(response + 1);
+#else
+        long long ret = atoll(response + 1);
+#endif
+        if (IS_ATOMIC(disque_sock)) {
+            if (ret > LONG_MAX) { /* overflow */
+                RETVAL_STRINGL(response + 1, response_len - 1);
+            } else {
+                RETVAL_LONG((long) ret);
+            }
+        } else {
+            if (ret > LONG_MAX) { /* overflow */
+                add_next_index_stringl(z_tab, response + 1, response_len - 1);
+            } else {
+                add_next_index_long(z_tab, (long) ret);
+            }
+        }
+    } else {
+        if (IS_ATOMIC(disque_sock)) {
+            RETVAL_FALSE;
+        } else {
+            add_next_index_null(z_tab);
+        }
+    }
+    efree(response);
+}
+
+PHP_DISQUE_API int
+disque_response_enqueued(DisqueSock *disque_sock TSRMLS_DC) {
+    char *resp;
+    int resp_len, ret = FAILURE;
+
+    if ((resp = disque_sock_read(disque_sock, &resp_len TSRMLS_CC)) != NULL) {
+        if (strncmp(resp, "+QUEUED", 7) == 0) {
+            ret = SUCCESS;
+        }
+        efree(resp);
+    }
+    return ret;
+}
+
+PHP_DISQUE_API int
+disque_mbulk_reply_raw(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab, void *ctx) {
+    char inbuf[4096];
+    int numElems;
+    size_t len;
+
+    if (disque_sock_gets(disque_sock, inbuf, sizeof(inbuf) - 1, &len TSRMLS_CC) < 0) {
+        return -1;
+    }
+
+    if (inbuf[0] != '*') {
+        if (IS_ATOMIC(disque_sock)) {
+            if (inbuf[0] == '-') {
+                disque_sock_set_err(disque_sock, inbuf + 1, len);
+            }
+            RETVAL_FALSE;
+        } else {
+            add_next_index_bool(z_tab, 0);
+        }
+        return -1;
+    }
+    numElems = atoi(inbuf + 1);
+    zval zv, *z_multi_result = &zv;
+#if (PHP_MAJOR_VERSION < 7)
+    MAKE_STD_ZVAL(z_multi_result);
+#endif
+    array_init(z_multi_result); /* pre-allocate array for multi's results. */
+
+    disque_mbulk_reply_loop(INTERNAL_FUNCTION_PARAM_PASSTHRU, disque_sock,
+                            z_multi_result, numElems, UNSERIALIZE_NONE);
+
+    if (IS_ATOMIC(disque_sock)) {
+        RETVAL_ZVAL(z_multi_result, 0, 1);
+    } else {
+        add_next_index_zval(z_tab, z_multi_result);
+    }
+    /*zval_copy_ctor(return_value); */
+    return 0;
+}
+
+
+PHP_DISQUE_API void
+disque_mbulk_reply_loop(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
+                        zval *z_tab, int count, int unserialize) {
+    char *line;
+    int i, len;
+
+    for (i = 0; i < count; ++i) {
+        if ((line = disque_sock_read(disque_sock, &len TSRMLS_CC)) == NULL) {
+            add_next_index_bool(z_tab, 0);
+            continue;
+        }
+        if (line[0] == ':') {
+            /*
+             *这里返回时个整数
+             */
+            add_next_index_long(z_tab, atoi(line + 1));
+            continue;
+        }
+        /*
+         * 如果这里转出来是*开头的,那么这里就是转成zval结构了
+         */
+        if (line[0] == '*') {
+            int numElems = atoi(line + 1);
+
+            zval zv, *z_multi_result = &zv;
+#if (PHP_MAJOR_VERSION < 7)
+            MAKE_STD_ZVAL(z_multi_result);
+#endif
+            array_init(z_multi_result);
+            disque_mbulk_reply_loop(INTERNAL_FUNCTION_PARAM_PASSTHRU, disque_sock, z_multi_result, numElems,
+                                    UNSERIALIZE_NONE);
+            add_next_index_zval(z_tab, z_multi_result);
+            continue;
+
+        }
+        /* We will attempt unserialization, if we're unserializing everything,
+         * or if we're unserializing keys and we're on a key, or we're
+         * unserializing values and we're on a value! */
+        int unwrap = (
+                (unserialize == UNSERIALIZE_ALL) ||
+                (unserialize == UNSERIALIZE_KEYS && i % 2 == 0) ||
+                (unserialize == UNSERIALIZE_VALS && i % 2 != 0)
+        );
+        zval zv, *z = &zv;
+        if (unwrap && disque_unpack(disque_sock, line, len, z TSRMLS_CC)) {
+#if (PHP_MAJOR_VERSION < 7)
+            MAKE_STD_ZVAL(z);
+            *z = zv;
+#endif
+            add_next_index_zval(z_tab, z);
+        } else {
+            add_next_index_stringl(z_tab, line, len);
+        }
+        efree(line);
+    }
+}
+
+
+PHP_DISQUE_API void disque_parse_info_response(char *response, zval *z_ret) {
+    char *cur, *pos;
+
+    array_init(z_ret);
+
+    cur = response;
+    while (1) {
+        /* skip comments and empty lines */
+        if (*cur == '#' || *cur == '\r') {
+            if ((cur = strstr(cur, _NL)) == NULL) {
+                break;
+            }
+            cur += 2;
+            continue;
+        }
+
+        /* key */
+        if ((pos = strchr(cur, ':')) == NULL) {
+            break;
+        }
+        char *key = cur;
+        int key_len = pos - cur;
+        key[key_len] = '\0';
+
+        /* value */
+        cur = pos + 1;
+        if ((pos = strstr(cur, _NL)) == NULL) {
+            break;
+        }
+        char *value = cur;
+        int value_len = pos - cur;
+        value[value_len] = '\0';
+
+        double dval;
+        zend_long lval;
+        zend_uchar type = is_numeric_string(value, value_len, &lval, &dval, 0);
+        if (type == IS_LONG) {
+            add_assoc_long_ex(z_ret, key, key_len, lval);
+        } else if (type == IS_DOUBLE) {
+            add_assoc_double_ex(z_ret, key, key_len, dval);
+        } else {
+            add_assoc_stringl_ex(z_ret, key, key_len, value, value_len);
+        }
+
+        cur = pos + 2; /* \r, \n */
+    }
 }
 
 PHP_METHOD (Disque, __construct) {
@@ -1237,7 +1425,7 @@ PHP_METHOD (Disque, close) {
 }
 
 PHP_METHOD (Disque, hello) {
-    DISQUE_PROCESS_KW_CMD("HELLO", disque_empty_cmd, disque_debug_response);
+    DISQUE_PROCESS_KW_CMD("HELLO", disque_empty_cmd, disque_mbulk_reply_raw);
 }
 
 PHP_METHOD (Disque, connect) {
@@ -1254,4 +1442,8 @@ PHP_METHOD (Disque, pconnect) {
     } else {
         RETURN_TRUE;
     }
+}
+
+PHP_METHOD (Disque, ping) {
+    DISQUE_PROCESS_KW_CMD("PING", disque_empty_cmd, disque_ping_response);
 }
