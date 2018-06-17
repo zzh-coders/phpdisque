@@ -62,7 +62,7 @@ typedef struct {
     size_t pipeline_len;
 
     zend_string *err;
-
+    zend_string    *prefix;
     zend_bool lazy_connect;
 
     int readonly;
@@ -82,18 +82,6 @@ typedef struct {
 } disque_object;
 #endif
 
-PHP_METHOD (Disque, __construct);
-
-PHP_METHOD (Disque, __destruct);
-
-PHP_METHOD (Disque, connect);
-
-PHP_METHOD (Disque, pconnect);
-
-PHP_METHOD (Disque, close);
-
-PHP_METHOD (Disque, hello);//实现disque的hello命令
-PHP_METHOD (Disque, ping);
 #ifdef PHP_WIN32
     #	define PHP_DISQUE_API __declspec(dllexport)
 #elif defined(__GNUC__) && __GNUC__ >= 4
@@ -227,6 +215,9 @@ disque_sock_write(DisqueSock *disque_sock, char *cmd, size_t sz TSRMLS_DC);
 PHP_DISQUE_API void disque_stream_close(DisqueSock *disque_sock TSRMLS_DC);
 
 PHP_DISQUE_API int
+disque_key_prefix(DisqueSock *disque_sock, char **key, strlen_t *key_len);
+
+PHP_DISQUE_API int
 disque_check_eof(DisqueSock *disque_sock, int no_throw TSRMLS_DC);
 PHP_DISQUE_API int
 disque_sock_gets(DisqueSock *disque_sock, char *buf, int buf_size,
@@ -249,12 +240,19 @@ disque_ping_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
 PHP_DISQUE_API void
 disque_string_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab, void *ctx);
 
+int disque_key_long_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
+                        char *kw, char **cmd, int *cmd_len, short *slot,
+                        void **ctx);
 int disque_str_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw,
                    char **cmd, int *cmd_len, short *slot, void **ctx);
-
+int disque_ids_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
+                   char *kw, char **cmd, int *cmd_len, short *slot,
+                   void **ctx);
 int disque_empty_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
                      char *kw, char **cmd, int *cmd_len, short *slot,
                      void **ctx);
+
+PHP_DISQUE_API void disque_parse_job_response(zval *z_tab, zval *z_ret);
 PHP_DISQUE_API void disque_parse_info_response(char *response, zval *z_ret);
 
 #define DISQUE_SAVE_CALLBACK(callback, closure_context) do { \
@@ -293,4 +291,22 @@ disque_mbulk_reply_loop(INTERNAL_FUNCTION_PARAMETERS,DisqueSock *disque_sock,
                         zval *z_tab, int count, int unserialize);
 PHP_DISQUE_API int  disque_response_enqueued(DisqueSock * disque_sock TSRMLS_DC);
 
+PHP_METHOD (Disque, __construct);
+PHP_METHOD (Disque, __destruct);
+PHP_METHOD (Disque, connect);
+PHP_METHOD (Disque, pconnect);
+PHP_METHOD (Disque, close);
+PHP_METHOD (Disque, hello);//实现disque的hello命令
+PHP_METHOD (Disque, ping);
+PHP_METHOD (Disque, info);
+PHP_METHOD (Disque, addJob);
+PHP_METHOD (Disque, getJob);
+PHP_METHOD (Disque, ackJob);
+PHP_METHOD (Disque, fastAck);
+PHP_METHOD (Disque, delJob);
+PHP_METHOD (Disque, show);
+PHP_METHOD (Disque, qlen);
+PHP_METHOD (Disque, qpeek);
+PHP_METHOD(Disque, enqueue);
+PHP_METHOD(Disque, dequeue);
 #endif    /* PHP_DISQUE_H */

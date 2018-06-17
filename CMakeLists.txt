@@ -7,7 +7,8 @@ include_directories(.)
 
 add_executable(php_disque
         php_disque.c
-        php_disque.h)
+        php_disque.h
+        common.h)
 
 
 #定义php源码路径，这里根据自己的真实路径来更改
