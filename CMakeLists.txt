@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.10)
-project(php_disque C)
+project(phpdisque C)
 
 set(CMAKE_C_STANDARD 11)
 
 include_directories(.)
 
-add_executable(php_disque
-        php_disque.c
+add_executable(phpdisque
+        disque.c
         php_disque.h
         common.h)
 
