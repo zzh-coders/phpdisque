@@ -111,27 +111,24 @@ PHP_MINFO_FUNCTION(disque);
     disque_sock->stream = NULL; \
     disque_sock->status = DISQUE_SOCK_STATUS_FAILED
 
-
-#define PIPELINE_ENQUEUE_COMMAND(cmd, cmd_len) do { \
-    if (disque_sock->pipeline_cmd == NULL) { \
-        disque_sock->pipeline_cmd = estrndup(cmd, cmd_len); \
-    } else { \
-        disque_sock->pipeline_cmd = erealloc(disque_sock->pipeline_cmd, \
-            disque_sock->pipeline_len + cmd_len); \
-        memcpy(&disque_sock->pipeline_cmd[disque_sock->pipeline_len], \
-            cmd, cmd_len); \
-    } \
-    disque_sock->pipeline_len += cmd_len; \
-} while (0)
-
 #define SOCKET_WRITE_COMMAND(disque_sock, cmd, cmd_len) \
     if(disque_sock_write(disque_sock, cmd, cmd_len TSRMLS_CC) < 0) { \
     efree(cmd); \
-    RETURN_FALSE; \
+    RETURN_FALSE;\
 }
 #define DISQUE_PROCESS_REQUEST(disque_sock, cmd, cmd_len) \
     SOCKET_WRITE_COMMAND(disque_sock, cmd, cmd_len); \
-    efree(cmd);
+    efree(cmd)
+
+#define DISQUE_PROCESS_CMD(cmdname, resp_func) \
+    DisqueSock *disque_sock; char *cmd; int cmd_len; \
+    if ((disque_sock = disque_sock_get(getThis() TSRMLS_CC, 0)) == NULL || \
+       disque_##cmdname##_cmd(INTERNAL_FUNCTION_PARAM_PASSTHRU,disque_sock, \
+                             &cmd, &cmd_len)==FAILURE) { \
+            RETURN_FALSE; \
+    } \
+    DISQUE_PROCESS_REQUEST(disque_sock, cmd, cmd_len); \
+    resp_func(INTERNAL_FUNCTION_PARAM_PASSTHRU, disque_sock, NULL); \
 
 #define DISQUE_PROCESS_KW_CMD(kw, cmdfunc, resp_func) \
     DisqueSock *disque_sock; char *cmd; int cmd_len; \
@@ -153,7 +150,7 @@ PHP_MINFO_FUNCTION(disque);
 
 #define DISQUE_CMD_SPPRINTF(ret, kw, fmt, ...) \
     disque_spprintf(disque_sock, ret, kw, fmt, ##__VA_ARGS__)
-
+typedef void (*SuccessCallback)(DisqueSock *disque_sock);
 int disque_cmd_init_sstr(smart_string *str, int num_args, char *keyword, int keyword_len);
 int disque_cmd_append_sstr(smart_string *str, char *append, int append_len);
 int disque_cmd_append_sstr_int(smart_string *str, int append);
@@ -163,6 +160,7 @@ int disque_key_long_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, c
 int disque_str_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len);
 int disque_ids_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len);
 int disque_empty_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len);
+int disque_auth_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char **cmd, int *cmd_len);
 
 PHP_DISQUE_API int disque_connect(INTERNAL_FUNCTION_PARAMETERS, int persistent);
 PHP_DISQUE_API int disque_sock_connect(DisqueSock *disque_sock TSRMLS_DC);
@@ -193,16 +191,19 @@ PHP_DISQUE_API int disque_unpack(DisqueSock *disque_sock, const char *val, int v
 PHP_DISQUE_API int disque_serialize(DisqueSock *disque_sock, zval *z, char **val, strlen_t *val_lenTSRMLS_DC);
 PHP_DISQUE_API int disque_unserialize(DisqueSock *disque_sock, const char *val, int val_len, zval *z_ret TSRMLS_DC);
 PHP_DISQUE_API void disque_ping_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab);
-PHP_DISQUE_API void disque_parse_job_response(zval *z_tab, zval *z_ret);
+PHP_DISQUE_API int disque_parse_job_response(zval *z_tab, zval *z_ret);
 PHP_DISQUE_API void disque_parse_info_response(char *response, zval *z_ret);
 PHP_DISQUE_API int disque_mbulk_reply_raw(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab);
 PHP_DISQUE_API void disque_mbulk_reply_loop(INTERNAL_FUNCTION_PARAMETERS,DisqueSock *disque_sock, zval *z_tab, int count, int unserialize);
 PHP_DISQUE_API void disque_multi_job_respone(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab);
+PHP_DISQUE_API void disque_show_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab);
+PHP_DISQUE_API void disque_boolean_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab);
 
 PHP_METHOD (Disque, __construct);
 PHP_METHOD (Disque, __destruct);
 PHP_METHOD (Disque, connect);
 PHP_METHOD (Disque, pconnect);
+PHP_METHOD (Disque, auth);
 PHP_METHOD (Disque, close);
 PHP_METHOD (Disque, hello);//实现disque的hello命令
 PHP_METHOD (Disque, ping);

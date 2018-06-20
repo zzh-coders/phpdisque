@@ -53,6 +53,10 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_connect, 0, 0, 1)
                 ZEND_ARG_INFO(0, retry_interval)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_auth, 0, 0, 1)
+                ZEND_ARG_INFO(0, password)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_pconnect, 0, 0, 1)
                 ZEND_ARG_INFO(0, host)
                 ZEND_ARG_INFO(0, port)
@@ -89,8 +93,9 @@ static zend_function_entry disque_functions[] = {
         PHP_ME(Disque, __destruct, arginfo_void, ZEND_ACC_DTOR | ZEND_ACC_PUBLIC)
         PHP_ME(Disque, connect, arginfo_connect, ZEND_ACC_CTOR | ZEND_ACC_PUBLIC)
         PHP_ME(Disque, pconnect, arginfo_pconnect, ZEND_ACC_PUBLIC)
-        PHP_ME(Disque, close, arginfo_void, ZEND_ACC_CTOR | ZEND_ACC_PUBLIC)
-        PHP_ME(Disque, hello, arginfo_void, ZEND_ACC_DTOR | ZEND_ACC_PUBLIC)
+        PHP_ME(Disque, auth, arginfo_auth, ZEND_ACC_PUBLIC)
+        PHP_ME(Disque, close, arginfo_void, ZEND_ACC_PUBLIC)
+        PHP_ME(Disque, hello, arginfo_void, ZEND_ACC_PUBLIC)
         PHP_ME(Disque, ping, arginfo_void, ZEND_ACC_PUBLIC)
         PHP_ME(Disque, info, arginfo_void, ZEND_ACC_PUBLIC)
         PHP_ME(Disque, addJob, arginfo_addjob, ZEND_ACC_PUBLIC)
@@ -709,7 +714,7 @@ static int resend_auth(DisqueSock *disque_sock TSRMLS_DC) {
     char *cmd, *response;
     int cmd_len, response_len;
 
-    cmd_len = disque_spprintf(disque_sock, NULL TSRMLS_CC, &cmd, "AUTH", "s",
+    cmd_len = disque_spprintf(disque_sock, &cmd, "AUTH", "s",
                               ZSTR_VAL(disque_sock->auth), ZSTR_LEN(disque_sock->auth));
 
     if (disque_sock_write(disque_sock, cmd, cmd_len TSRMLS_CC) < 0) {
@@ -1172,6 +1177,27 @@ int disque_str_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *
     return SUCCESS;
 }
 
+int disque_auth_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
+                    char **cmd, int *cmd_len) {
+    char *pw;
+    strlen_t pw_len;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &pw, &pw_len)
+        == FAILURE) {
+        return FAILURE;
+    }
+
+    // Construct our AUTH command
+    *cmd_len = DISQUE_CMD_SPPRINTF(cmd, "AUTH", "s", pw, pw_len);
+
+    // Free previously allocated password, and update
+    if (disque_sock->auth) zend_string_release(disque_sock->auth);
+    disque_sock->auth = zend_string_init(pw, pw_len, 0);
+
+    // Success
+    return SUCCESS;
+}
+
 int disque_empty_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
                      char *kw, char **cmd, int *cmd_len) {
     *cmd_len = DISQUE_CMD_SPPRINTF(cmd, kw, "");
@@ -1461,18 +1487,18 @@ PHP_DISQUE_API void
 disque_multi_job_respone(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
 
     disque_mbulk_reply_raw(INTERNAL_FUNCTION_PARAM_PASSTHRU, disque_sock, z_tab);
-    zval zv, *z_multi_result = &zv;
+    zval zv = {{0}}, *z_ret = &zv;
 #if (PHP_MAJOR_VERSION < 7)
-    MAKE_STD_ZVAL(z_multi_result);
+    MAKE_STD_ZVAL(z_ret);
 #endif
-    array_init(z_multi_result);
+    array_init(z_ret);
 
     if (return_value && Z_TYPE_P(return_value) == IS_ARRAY) {
-        disque_parse_job_response(return_value, z_multi_result);
+        disque_parse_job_response(return_value, z_ret);
     }
 
 
-    RETVAL_ZVAL(z_multi_result, 0, 1);
+    RETVAL_ZVAL(z_ret, 0, 1);
 }
 
 
@@ -1526,7 +1552,18 @@ disque_mbulk_reply_loop(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
             /*
              *这里返回时个整数
              */
-            add_next_index_long(z_tab, atoi(line + 1));
+#ifdef PHP_WIN32
+            __int64 ret = _atoi64(line + 1);
+#else
+            long long ret = atoll(line + 1);
+#endif
+
+            if (ret > LONG_MAX) { /* overflow */
+                add_next_index_stringl(z_tab, line + 1, len - 1);
+            } else {
+                add_next_index_long(z_tab, (long) ret);
+            }
+
             continue;
         }
         /*
@@ -1535,7 +1572,7 @@ disque_mbulk_reply_loop(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
         if (line[0] == '*') {
             int numElems = atoi(line + 1);
 
-            zval zv, *z_multi_result = &zv;
+            zval zv = {{0}}, *z_multi_result = &zv;
 #if (PHP_MAJOR_VERSION < 7)
             MAKE_STD_ZVAL(z_multi_result);
 #endif
@@ -1568,14 +1605,12 @@ disque_mbulk_reply_loop(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
     }
 }
 
-PHP_DISQUE_API void disque_parse_job_response(zval *z_tab, zval *z_ret) {
+PHP_DISQUE_API int disque_parse_job_response(zval *z_tab, zval *z_ret) {
     ulong idx;
     zend_string * zkey;
-    HashTable * ht_opt;
-    zval * z_ele, *tmpstr;
-    array_init(z_ret);
-    zval zv, *tmp_zval = &zv;
-    array_init(tmp_zval);
+    HashTable * ht_opt, *ht_z_ele;
+    zval * z_ele;
+
 
     ht_opt = Z_ARRVAL_P(z_tab);
     ZEND_HASH_FOREACH_KEY_VAL(ht_opt, idx, zkey, z_ele)
@@ -1583,23 +1618,97 @@ PHP_DISQUE_API void disque_parse_job_response(zval *z_tab, zval *z_ret) {
                 if (!z_ele || Z_TYPE_P(z_ele) != IS_ARRAY) {
                     continue;
                 }
-                ZVAL_IS_NULL(tmp_zval);
                 ZVAL_DEREF(z_ele);
-                HashTable * ht_z_ele = Z_ARRVAL_P(z_ele);
-                if ((tmpstr = zend_hash_index_find(ht_z_ele, 0)) != NULL && Z_TYPE_P(tmpstr) == IS_STRING) {
-                    add_assoc_stringl_ex(tmp_zval, "queue", strlen("queue"), Z_STRVAL_P(tmpstr), Z_STRLEN_P(tmpstr));
-                }
-                if ((tmpstr = zend_hash_index_find(ht_z_ele, 1)) != NULL && Z_TYPE_P(tmpstr) == IS_STRING) {
-                    add_assoc_stringl_ex(tmp_zval, "job_id", strlen("job_id"), Z_STRVAL_P(tmpstr), Z_STRLEN_P(tmpstr));
-                }
-                if ((tmpstr = zend_hash_index_find(ht_z_ele, 2)) != NULL && Z_TYPE_P(tmpstr) == IS_STRING) {
-                    add_assoc_stringl_ex(tmp_zval, "body", strlen("body"), Z_STRVAL_P(tmpstr), Z_STRLEN_P(tmpstr));
-                }
+                ht_z_ele = Z_ARRVAL_P(z_ele);
+                ulong tmp_idx;
+                zval * z_v;
+                zval zv, *tmp_zval = &zv;
+                array_init(tmp_zval);
+                ZEND_HASH_FOREACH_NUM_KEY_VAL(Z_ARRVAL_P(z_ele), tmp_idx, z_v)
+                        {
+                            if (!z_v || Z_TYPE_P(z_v) != IS_STRING) {
+                                continue;
+                            }
+                            ZVAL_DEREF(z_v);
+                            switch (tmp_idx) {
+                                case 0:
+                                    add_assoc_stringl(tmp_zval, "queue", Z_STRVAL_P(z_v), Z_STRLEN_P(z_v));
+                                    break;
+                                case 1:
+                                    add_assoc_stringl(tmp_zval, "id", Z_STRVAL_P(z_v), Z_STRLEN_P(z_v));
+                                    break;
+                                case 2:
+                                    add_assoc_stringl(tmp_zval, "body", Z_STRVAL_P(z_v), Z_STRLEN_P(z_v));
+                                    break;
+                                default:
+                                    php_error_docref(NULL TSRMLS_CC, E_WARNING,
+                                                     "array key not found");
+                                    return FAILURE;
 
+                            }
+                        }
+                ZEND_HASH_FOREACH_END();
                 add_next_index_zval(z_ret, tmp_zval);
 
             }ZEND_HASH_FOREACH_END();
-    efree(z_ele);
+    return SUCCESS;
+}
+
+PHP_DISQUE_API int disque_parse_show_response(zval *z_tab, zval *z_ret) {
+    ulong idx;
+    zval * z_ele;
+
+    char *key = 0;
+    int key_len = 0;
+
+    ZEND_HASH_FOREACH_NUM_KEY_VAL(Z_ARRVAL_P(z_tab), idx, z_ele)
+            {
+                if (!z_ele) {
+                    continue;
+                }
+                ZVAL_DEREF(z_ele);
+                if ((idx & 1) == 0) {
+                    key = Z_STRVAL_P(z_ele);
+                    key_len = Z_STRLEN_P(z_ele);
+                    key[key_len] = '\0';
+
+                } else {
+                    switch (Z_TYPE_P(z_ele)) {
+                        case IS_ARRAY:
+                            add_assoc_zval(z_ret, key, z_ele);
+                            break;
+                        case IS_LONG:
+                            add_assoc_long(z_ret, key, z_ele);
+                            break;
+                        case IS_STRING:
+                            add_assoc_stringl(z_ret, key, Z_STRVAL_P(z_ele), Z_STRLEN_P(z_ele));
+                            break;
+                        default:
+                            php_error_docref(NULL TSRMLS_CC, E_WARNING,
+                                             "array key not found");
+                            return FAILURE;
+
+                    }
+                }
+
+            }ZEND_HASH_FOREACH_END();
+
+    return SUCCESS;
+}
+
+PHP_DISQUE_API void disque_show_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
+    disque_mbulk_reply_raw(INTERNAL_FUNCTION_PARAM_PASSTHRU, disque_sock, z_tab);
+    zval zv = {{0}}, *z_ret = &zv;
+#if (PHP_MAJOR_VERSION < 7)
+    MAKE_STD_ZVAL(z_ret);
+#endif
+    array_init(z_ret);
+
+    if (return_value && Z_TYPE_P(return_value) == IS_ARRAY) {
+        disque_parse_show_response(return_value, z_ret);
+    }
+
+    RETVAL_ZVAL(z_ret, 0, 1);
 }
 
 
@@ -1651,6 +1760,29 @@ PHP_DISQUE_API void disque_parse_info_response(char *response, zval *z_ret) {
     }
 }
 
+
+PHP_DISQUE_API void disque_boolean_response_impl(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab,
+                                                 SuccessCallback success_callback) {
+
+    char *response;
+    int response_len;
+    zend_bool ret = 0;
+
+    if ((response = disque_sock_read(disque_sock, &response_len TSRMLS_CC)) != NULL) {
+        ret = (*response == '+');
+        efree(response);
+    }
+
+    if (ret && success_callback != NULL) {
+        success_callback(disque_sock);
+    }
+    RETURN_BOOL(ret);
+}
+
+PHP_DISQUE_API void disque_boolean_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
+    disque_boolean_response_impl(INTERNAL_FUNCTION_PARAM_PASSTHRU, disque_sock, z_tab, NULL);
+}
+
 PHP_METHOD (Disque, __construct) {
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "") == FAILURE) {
         RETURN_FALSE;
@@ -1692,6 +1824,10 @@ PHP_METHOD (Disque, pconnect) {
     }
 }
 
+PHP_METHOD (Disque, auth) {
+    DISQUE_PROCESS_CMD(auth, disque_boolean_response);
+}
+
 PHP_METHOD (Disque, ping) {
     DISQUE_PROCESS_KW_CMD("PING", disque_empty_cmd, disque_ping_response);
 }
@@ -1722,7 +1858,7 @@ PHP_METHOD (Disque, delJob) {
 }
 
 PHP_METHOD (Disque, show) {
-    DISQUE_PROCESS_KW_CMD("SHOW", disque_str_cmd, disque_mbulk_reply_raw);
+    DISQUE_PROCESS_KW_CMD("SHOW", disque_str_cmd, disque_show_response);
 }
 
 PHP_METHOD (Disque, qlen) {
