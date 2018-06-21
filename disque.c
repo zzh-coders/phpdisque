@@ -1678,7 +1678,7 @@ PHP_DISQUE_API int disque_parse_show_response(zval *z_tab, zval *z_ret) {
                             add_assoc_zval(z_ret, key, z_ele);
                             break;
                         case IS_LONG:
-                            add_assoc_long(z_ret, key, z_ele);
+                            add_assoc_long(z_ret, key, Z_LVAL_P(z_ele));
                             break;
                         case IS_STRING:
                             add_assoc_stringl(z_ret, key, Z_STRVAL_P(z_ele), Z_STRLEN_P(z_ele));
