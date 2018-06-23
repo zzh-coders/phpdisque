@@ -36,3 +36,11 @@ int qlen(string $queue);
 array qpeek(string $queue, int $count);
 
 array show(string $id);
+
+int working(string $id)
+
+array qscan(array $options = [])
+
+int nack(string... $ids)
+
+array jscan(array $options = [])

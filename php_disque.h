@@ -55,7 +55,14 @@ typedef struct {
     int tcp_keepalive;
 } DisqueSock;
 /* }}} */
-
+union resparg {
+    char *str;
+    zend_string *zstr;
+    zval *zv;
+    int ival;
+    long lval;
+    double dval;
+};
 #if (PHP_MAJOR_VERSION < 7)
 typedef struct {
     zend_object std;
@@ -161,6 +168,8 @@ int disque_str_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *
 int disque_ids_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len);
 int disque_empty_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len);
 int disque_auth_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char **cmd, int *cmd_len);
+int disque_qscan_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len);
+int disque_jscan_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len);
 
 PHP_DISQUE_API int disque_connect(INTERNAL_FUNCTION_PARAMETERS, int persistent);
 PHP_DISQUE_API int disque_sock_connect(DisqueSock *disque_sock TSRMLS_DC);
@@ -216,6 +225,11 @@ PHP_METHOD (Disque, delJob);
 PHP_METHOD (Disque, show);
 PHP_METHOD (Disque, qlen);
 PHP_METHOD (Disque, qpeek);
-PHP_METHOD(Disque, enqueue);
-PHP_METHOD(Disque, dequeue);
+PHP_METHOD (Disque, enqueue);
+PHP_METHOD (Disque, dequeue);
+PHP_METHOD (Disque, working);
+PHP_METHOD (Disque, nack);
+PHP_METHOD (Disque, qstat);
+PHP_METHOD (Disque, qscan);
+PHP_METHOD (Disque, jscan);
 #endif    /* PHP_DISQUE_H */

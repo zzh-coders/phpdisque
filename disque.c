@@ -88,10 +88,14 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_qpeek, 0, 0, 1)
                 ZEND_ARG_INFO(0, count)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_array, 0, 0, 1)
+                ZEND_ARG_ARRAY_INFO(0, array, 0)
+ZEND_END_ARG_INFO()
+
 static zend_function_entry disque_functions[] = {
         PHP_ME(Disque, __construct, arginfo_void, ZEND_ACC_CTOR | ZEND_ACC_PUBLIC)
         PHP_ME(Disque, __destruct, arginfo_void, ZEND_ACC_DTOR | ZEND_ACC_PUBLIC)
-        PHP_ME(Disque, connect, arginfo_connect, ZEND_ACC_CTOR | ZEND_ACC_PUBLIC)
+        PHP_ME(Disque, connect, arginfo_connect, ZEND_ACC_PUBLIC)
         PHP_ME(Disque, pconnect, arginfo_pconnect, ZEND_ACC_PUBLIC)
         PHP_ME(Disque, auth, arginfo_auth, ZEND_ACC_PUBLIC)
         PHP_ME(Disque, close, arginfo_void, ZEND_ACC_PUBLIC)
@@ -108,6 +112,11 @@ static zend_function_entry disque_functions[] = {
         PHP_ME(Disque, qpeek, arginfo_qpeek, ZEND_ACC_PUBLIC)
         PHP_ME(Disque, enqueue, arginfo_ids, ZEND_ACC_PUBLIC)
         PHP_ME(Disque, dequeue, arginfo_ids, ZEND_ACC_PUBLIC)
+        PHP_ME(Disque, working, arginfo_key, ZEND_ACC_PUBLIC)
+        PHP_ME(Disque, nack, arginfo_ids, ZEND_ACC_PUBLIC)
+        PHP_ME(Disque, qstat, arginfo_key, ZEND_ACC_PUBLIC)
+        PHP_ME(Disque, qscan, arginfo_array, ZEND_ACC_PUBLIC)
+        PHP_ME(Disque, jscan, arginfo_array, ZEND_ACC_PUBLIC)
         PHP_FE_END
 };
 
@@ -138,7 +147,6 @@ zend_object *create_disque_object(zend_class_entry *ce TSRMLS_DC) {
 
     return &disque->std;
 }
-
 
 PHP_MINIT_FUNCTION (disque) {
     zend_class_entry disque_class_entry;
@@ -216,6 +224,72 @@ ZEND_TSRMLS_CACHE_DEFINE()
 #endif
 ZEND_GET_MODULE(disque)
 #endif
+
+PHP_DISQUE_API int disque_mconnect(INTERNAL_FUNCTION_PARAMETERS, int persistent) {
+
+    zval * object;
+    char *host = NULL, *persistent_id = "";
+    zend_long port = -1, retry_interval = 0;
+    strlen_t host_len, persistent_id_len;
+    double timeout = 0.0, read_timeout = 0.0;
+    disque_object *disque;
+
+#ifdef ZTS
+    /* not sure how in threaded mode this works so disabled persistence at
+     * first */
+    persistent = 0;
+#endif
+
+    if (zend_parse_method_parameters(ZEND_NUM_ARGS() TSRMLS_CC, getThis(),
+                                     "Os|ldsld", &object, disque_ce, &host,
+                                     &host_len, &port, &timeout, &persistent_id,
+                                     &persistent_id_len, &retry_interval,
+                                     &read_timeout) == FAILURE) {
+        return FAILURE;
+    } else if (!persistent) {
+        persistent_id = NULL;
+    }
+    if (timeout < 0L || timeout > INT_MAX) {
+        zend_throw_exception(disque_exception_ce,
+                             "Invalid connect timeout", 0 TSRMLS_CC);
+        return FAILURE;
+    }
+
+    if (read_timeout < 0L || read_timeout > INT_MAX) {
+        zend_throw_exception(disque_exception_ce,
+                             "Invalid read timeout", 0 TSRMLS_CC);
+        return FAILURE;
+    }
+
+    if (retry_interval < 0L || retry_interval > INT_MAX) {
+        zend_throw_exception(disque_exception_ce, "Invalid retry interval",
+                             0 TSRMLS_CC);
+        return FAILURE;
+    }
+    /* If it's not a unix socket, set to default */
+    if (port == -1 && host_len && host[0] != '/') {
+        port = 7711;
+    }
+
+    disque = PHPDISQUE_GET_OBJECT(disque_object, object);
+    if (disque->sock) {
+        disque_sock_disconnect(disque->sock TSRMLS_CC);
+        disque_free_socket(disque->sock);
+    }
+    disque->sock = disque_sock_create(host, host_len, port, timeout, read_timeout, persistent,
+                                      persistent_id, retry_interval);
+    if (disque_sock_server_open(disque->sock TSRMLS_CC) < 0) {
+        if (disque->sock->err) {
+            zend_throw_exception(disque_exception_ce, ZSTR_VAL(disque->sock->err), 0 TSRMLS_CC);
+        }
+        disque_free_socket(disque->sock);
+        disque->sock = NULL;
+        return FAILURE;
+    }
+
+    return SUCCESS;
+}
+
 
 PHP_DISQUE_API int disque_connect(INTERNAL_FUNCTION_PARAMETERS, int persistent) {
 
@@ -444,10 +518,9 @@ PHP_DISQUE_API void disque_free_socket(DisqueSock *disque_sock) {
     efree(disque_sock);
 }
 
-PHP_DISQUE_API DisqueSock *disque_sock_create(char *host, int host_len, unsigned short port,
-                                              double timeout, double read_timeout,
-                                              int persistent, char *persistent_id,
-                                              long retry_interval) {
+PHP_DISQUE_API DisqueSock *
+disque_sock_create(char *host, int host_len, unsigned short port, double timeout, double read_timeout, int persistent,
+                   char *persistent_id, long retry_interval) {
     DisqueSock *disque_sock;
 
     disque_sock = ecalloc(1, sizeof(DisqueSock));
@@ -477,8 +550,7 @@ PHP_DISQUE_API DisqueSock *disque_sock_create(char *host, int host_len, unsigned
     return disque_sock;
 }
 
-static zend_always_inline DisqueSock *
-disque_sock_get_instance(zval *id TSRMLS_DC, int no_throw) {
+static zend_always_inline DisqueSock *disque_sock_get_instance(zval *id TSRMLS_DC, int no_throw) {
     disque_object *disque;
 
     if (Z_TYPE_P(id) == IS_OBJECT) {
@@ -521,17 +593,7 @@ PHP_DISQUE_API DisqueSock *disque_sock_get_connected(INTERNAL_FUNCTION_PARAMETER
     return disque_sock;
 }
 
-union resparg {
-    char *str;
-    zend_string *zstr;
-    zval *zv;
-    int ival;
-    long lval;
-    double dval;
-};
-
-PHP_DISQUE_API int
-disque_key_prefix(DisqueSock *disque_sock, char **key, strlen_t *key_len) {
+PHP_DISQUE_API int disque_key_prefix(DisqueSock *disque_sock, char **key, strlen_t *key_len) {
     int ret_len;
     char *ret;
 
@@ -548,6 +610,7 @@ disque_key_prefix(DisqueSock *disque_sock, char **key, strlen_t *key_len) {
     *key_len = ret_len;
     return 1;
 }
+
 /* A printf like method to construct a Redis RESP command.  It has been extended
  * to take a few different format specifiers that are convienient to phpredis.
  *
@@ -563,8 +626,7 @@ disque_key_prefix(DisqueSock *disque_sock, char **key, strlen_t *key_len) {
  * l - A long
  * L - Alias to 'l'
  */
-PHP_DISQUE_API int
-disque_spprintf(DisqueSock *disque_sock, char **ret, char *kw, char *fmt, ...) {
+PHP_DISQUE_API int disque_spprintf(DisqueSock *disque_sock, char **ret, char *kw, char *fmt, ...) {
     smart_string cmd = {0};
     va_list ap;
     union resparg arg;
@@ -631,10 +693,6 @@ disque_spprintf(DisqueSock *disque_sock, char **ret, char *kw, char *fmt, ...) {
     return cmd.len;
 }
 
-/*
- * Given a smart string, number of arguments, a keyword, and the length of the keyword
- * initialize our smart string with the proper Redis header for the command to follow
- */
 int disque_cmd_init_sstr(smart_string *str, int num_args, char *keyword, int keyword_len) {
     smart_string_appendc(str, '*');
     smart_string_append_long(str, num_args + 1);
@@ -647,9 +705,6 @@ int disque_cmd_init_sstr(smart_string *str, int num_args, char *keyword, int key
     return str->len;
 }
 
-/*
- * Append a command sequence to a smart_string
- */
 int disque_cmd_append_sstr(smart_string *str, char *append, int append_len) {
     smart_string_appendc(str, '$');
     smart_string_append_long(str, append_len);
@@ -661,29 +716,19 @@ int disque_cmd_append_sstr(smart_string *str, char *append, int append_len) {
     return str->len;
 }
 
-/*
- * Append an integer to a smart string command
- */
 int disque_cmd_append_sstr_int(smart_string *str, int append) {
     char int_buf[32];
     int int_len = snprintf(int_buf, sizeof(int_buf), "%d", append);
     return disque_cmd_append_sstr(str, int_buf, int_len);
 }
 
-/*
- * Append a long to a smart string command
- */
 int disque_cmd_append_sstr_long(smart_string *str, long append) {
     char long_buf[32];
     int long_len = snprintf(long_buf, sizeof(long_buf), "%ld", append);
     return disque_cmd_append_sstr(str, long_buf, long_len);
 }
 
-/*
- * Append a double to a smart string command
- */
-int
-disque_cmd_append_sstr_dbl(smart_string *str, double value) {
+int disque_cmd_append_sstr_dbl(smart_string *str, double value) {
     char tmp[64];
     int len, retval;
 
@@ -697,8 +742,7 @@ disque_cmd_append_sstr_dbl(smart_string *str, double value) {
     return retval;
 }
 
-PHP_DISQUE_API int
-disque_sock_write(DisqueSock *disque_sock, char *cmd, size_t sz TSRMLS_DC) {
+PHP_DISQUE_API int disque_sock_write(DisqueSock *disque_sock, char *cmd, size_t sz TSRMLS_DC) {
     if (!disque_sock || disque_sock->status == DISQUE_SOCK_STATUS_DISCONNECTED) {
         zend_throw_exception(disque_exception_ce, "Connection closed",
                              0 TSRMLS_CC);
@@ -738,8 +782,7 @@ static int resend_auth(DisqueSock *disque_sock TSRMLS_DC) {
     return 0;
 }
 
-static void
-disque_error_throw(DisqueSock *disque_sock TSRMLS_DC) {
+static void disque_error_throw(DisqueSock *disque_sock TSRMLS_DC) {
     if (disque_sock != NULL && disque_sock->err != NULL &&
         memcmp(ZSTR_VAL(disque_sock->err), "ERR", sizeof("ERR") - 1) != 0 &&
         memcmp(ZSTR_VAL(disque_sock->err), "NOSCRIPT", sizeof("NOSCRIPT") - 1) != 0 &&
@@ -757,8 +800,7 @@ PHP_DISQUE_API void disque_stream_close(DisqueSock *disque_sock TSRMLS_DC) {
     }
 }
 
-PHP_DISQUE_API int
-disque_check_eof(DisqueSock *disque_sock, int no_throw TSRMLS_DC) {
+PHP_DISQUE_API int disque_check_eof(DisqueSock *disque_sock, int no_throw TSRMLS_DC) {
     int count;
 
     if (!disque_sock->stream) {
@@ -822,9 +864,7 @@ disque_check_eof(DisqueSock *disque_sock, int no_throw TSRMLS_DC) {
     return -1;
 }
 
-PHP_DISQUE_API int
-disque_sock_gets(DisqueSock *disque_sock, char *buf, int buf_size,
-                 size_t *line_size TSRMLS_DC) {
+PHP_DISQUE_API int disque_sock_gets(DisqueSock *disque_sock, char *buf, int buf_size, size_t *line_size TSRMLS_DC) {
     // Handle EOF
     if (-1 == disque_check_eof(disque_sock, 0 TSRMLS_CC)) {
         return -1;
@@ -849,9 +889,7 @@ disque_sock_gets(DisqueSock *disque_sock, char *buf, int buf_size,
     return 0;
 }
 
-
-PHP_DISQUE_API char *
-disque_sock_read_bulk_reply(DisqueSock *disque_sock, int bytes TSRMLS_DC) {
+PHP_DISQUE_API char *disque_sock_read_bulk_reply(DisqueSock *disque_sock, int bytes TSRMLS_DC) {
     int offset = 0;
     char *reply, c[2];
     size_t got;
@@ -886,8 +924,7 @@ disque_sock_read_bulk_reply(DisqueSock *disque_sock, int bytes TSRMLS_DC) {
     return reply;
 }
 
-PHP_DISQUE_API char *
-disque_sock_read(DisqueSock *disque_sock, int *buf_len TSRMLS_DC) {
+PHP_DISQUE_API char *disque_sock_read(DisqueSock *disque_sock, int *buf_len TSRMLS_DC) {
     char inbuf[4096];
     size_t len;
 
@@ -997,8 +1034,7 @@ PHP_DISQUE_API int disque_unpack(DisqueSock *disque_sock, const char *val, int v
     return disque_unserialize(disque_sock, val, val_len, z_ret TSRMLS_CC);
 }
 
-PHP_DISQUE_API int disque_serialize(DisqueSock *disque_sock, zval *z, char **val, strlen_t *val_len
-                                    TSRMLS_DC) {
+PHP_DISQUE_API int disque_serialize(DisqueSock *disque_sock, zval *z, char **val, strlen_t *val_len TSRMLS_DC) {
 #if ZEND_MODULE_API_NO >= 20100000
     php_serialize_data_t ht;
 #else
@@ -1077,10 +1113,7 @@ PHP_DISQUE_API int disque_serialize(DisqueSock *disque_sock, zval *z, char **val
     return 0;
 }
 
-PHP_DISQUE_API int
-disque_unserialize(DisqueSock *disque_sock, const char *val, int val_len,
-                   zval *z_ret TSRMLS_DC) {
-
+PHP_DISQUE_API int disque_unserialize(DisqueSock *disque_sock, const char *val, int val_len, zval *z_ret TSRMLS_DC) {
     php_unserialize_data_t var_hash;
     int ret = 0;
 
@@ -1142,9 +1175,7 @@ disque_unserialize(DisqueSock *disque_sock, const char *val, int val_len,
     return ret;
 }
 
-PHP_DISQUE_API void
-disque_ping_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
-                     zval *z_tab) {
+PHP_DISQUE_API void disque_ping_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
 
     char *response;
     int response_len;
@@ -1160,8 +1191,7 @@ disque_ping_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
     efree(response);
 }
 
-int disque_str_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw,
-                   char **cmd, int *cmd_len) {
+int disque_str_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len) {
     char *arg;
     strlen_t arg_len;
 
@@ -1177,8 +1207,7 @@ int disque_str_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *
     return SUCCESS;
 }
 
-int disque_auth_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
-                    char **cmd, int *cmd_len) {
+int disque_auth_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char **cmd, int *cmd_len) {
     char *pw;
     strlen_t pw_len;
 
@@ -1198,14 +1227,12 @@ int disque_auth_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
     return SUCCESS;
 }
 
-int disque_empty_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
-                     char *kw, char **cmd, int *cmd_len) {
+int disque_empty_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len) {
     *cmd_len = DISQUE_CMD_SPPRINTF(cmd, kw, "");
     return SUCCESS;
 }
 
-int disque_ids_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
-                   char *kw, char **cmd, int *cmd_len) {
+int disque_ids_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len) {
     int argc = ZEND_NUM_ARGS();
     zval * z_args;
 
@@ -1243,8 +1270,7 @@ int disque_ids_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
     return SUCCESS;
 }
 
-int disque_add_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
-                       char *kw, char **cmd, int *cmd_len) {
+int disque_add_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len) {
     char *key, *job;
     strlen_t key_len, job_len;
     zval * z_opt = NULL, *z_ele;
@@ -1277,6 +1303,7 @@ int disque_add_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
             arg_count++;
             opt_counts--;
             timeout = zval_get_long(z_ele);
+            zend_hash_str_del(ht_opt, "timeout", sizeof("timeout") - 1);
         }
 
         if (((z_ele = zend_hash_str_find(ht_opt, "async", sizeof("async") - 1)) != NULL) &&
@@ -1284,6 +1311,7 @@ int disque_add_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
             arg_count++;
             opt_counts--;
             async = IS_TRUE;
+            zend_hash_str_del(ht_opt, "async", sizeof("async") - 1);
         }
 
         arg_count += (opt_counts * 2);
@@ -1331,8 +1359,7 @@ int disque_add_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
     return SUCCESS;
 }
 
-int disque_key_long_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
-                        char *kw, char **cmd, int *cmd_len) {
+int disque_key_long_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len) {
     char *key;
     strlen_t keylen;
     zend_long lval;
@@ -1348,8 +1375,7 @@ int disque_key_long_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
     return SUCCESS;
 }
 
-int disque_get_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
-                       char *kw, char **cmd, int *cmd_len) {
+int disque_get_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len) {
     char *key;
     strlen_t key_len;
     zval * z_opt = NULL, *z_ele;
@@ -1358,7 +1384,7 @@ int disque_get_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
     smart_string cmdstr = {0};
     ulong idx;
     HashTable * ht_opt;
-    int arg_count = 0;
+    int arg_count = 2;
 
     int nohang = IS_FALSE, withcounters = IS_FALSE;
     PHPDISQUE_NOTUSED(idx);
@@ -1371,10 +1397,6 @@ int disque_get_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
     if (zend_parse_parameters(argc TSRMLS_CC, "s|z", &key, &key_len, &z_opt) == FAILURE) {
         return FAILURE;
     }
-//
-//    'nohang' => false,
-//            'count' => null,
-//            'timeout' => null
     if (z_opt && Z_TYPE_P(z_opt) == IS_ARRAY) {
         ht_opt = Z_ARRVAL_P(z_opt);
         int opt_counts = zend_hash_num_elements(ht_opt);
@@ -1384,6 +1406,7 @@ int disque_get_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
             arg_count++;
             opt_counts--;
             nohang = IS_TRUE;
+            zend_hash_str_del(ht_opt, "nohang", sizeof("nohang") - 1);
         }
 
         if (((z_ele = zend_hash_str_find(ht_opt, "withcounters", sizeof("withcounters") - 1)) != NULL) &&
@@ -1391,12 +1414,13 @@ int disque_get_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
             arg_count++;
             opt_counts--;
             withcounters = IS_TRUE;
+            zend_hash_str_del(ht_opt, "withcounters", sizeof("withcounters") - 1);
         }
 
 
         arg_count += (opt_counts * 2);
         /* Build our command header */
-        disque_cmd_init_sstr(&cmdstr, arg_count + 2, kw, strlen(kw));
+        disque_cmd_init_sstr(&cmdstr, arg_count, kw, strlen(kw));
         if (nohang == IS_TRUE) {
             disque_cmd_append_sstr(&cmdstr, "NOHANG", sizeof("NOHANG") - 1);
         }
@@ -1419,7 +1443,7 @@ int disque_get_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
                 }ZEND_HASH_FOREACH_END();
 
     } else {
-        disque_cmd_init_sstr(&cmdstr, arg_count + 2, kw, strlen(kw));
+        disque_cmd_init_sstr(&cmdstr, arg_count, kw, strlen(kw));
     }
     disque_cmd_append_sstr(&cmdstr, "FROM", 4);
     disque_cmd_append_sstr(&cmdstr, key, strlen(key));
@@ -1430,9 +1454,176 @@ int disque_get_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
     return SUCCESS;
 }
 
+int disque_qscan_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len) {
+    char *key;
+    strlen_t key_len;
+    zval * z_opt = NULL, *z_ele;
+    int argc = ZEND_NUM_ARGS();
+    zend_string * zkey;
+    smart_string cmdstr = {0};
+    ulong idx;
+    HashTable * ht_opt;
+    int arg_count = 0;
+    zend_bool busyloop = IS_FALSE;
+    PHPDISQUE_NOTUSED(idx);
 
-PHP_DISQUE_API void
-disque_info_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
+    if (argc > 1) {
+        php_error_docref(0 TSRMLS_CC, E_WARNING, "Must pass either 0 or 1 arguments");
+        return FAILURE;
+    }
+
+    if (zend_parse_parameters(argc TSRMLS_CC, "|z", &z_opt) == FAILURE) {
+        return FAILURE;
+    }
+    if (z_opt && Z_TYPE_P(z_opt) == IS_ARRAY) {
+        ht_opt = Z_ARRVAL_P(z_opt);
+        int opt_counts = zend_hash_num_elements(ht_opt);
+
+
+        if (((z_ele = zend_hash_str_find(ht_opt, "busyloop", sizeof("busyloop") - 1)) != NULL) &&
+            Z_TYPE_P(z_ele) == IS_TRUE) {
+            arg_count++;
+            opt_counts--;
+            busyloop = IS_TRUE;
+            zend_hash_str_del(ht_opt, "busyloop", sizeof("busyloop") - 1);
+        }
+
+
+        arg_count += (opt_counts * 2);
+        /* Build our command header */
+        disque_cmd_init_sstr(&cmdstr, arg_count, kw, strlen(kw));
+        if (IS_TRUE == busyloop) {
+            disque_cmd_append_sstr(&cmdstr, "BUSYLOOP", sizeof("BUSYLOOP") - 1);
+        }
+        ZEND_HASH_FOREACH_KEY_VAL(ht_opt, idx, zkey, z_ele)
+                {
+                    /* All options require a string key type */
+                    if (!zkey) continue;
+                    ZVAL_DEREF(z_ele);
+
+                    if (IS_COUNT_ARG(ZSTR_VAL(zkey), ZSTR_LEN(zkey)) && Z_TYPE_P(z_ele) == IS_LONG) {
+                        disque_cmd_append_sstr(&cmdstr, "COUNT", sizeof("COUNT") - 1);
+                    } else if (IS_MAXLEN_ARG(ZSTR_VAL(zkey), ZSTR_LEN(zkey)) && Z_TYPE_P(z_ele) == IS_LONG) {
+                        disque_cmd_append_sstr(&cmdstr, "MAXLEN", sizeof("MAXLEN") - 1);
+                    } else if (IS_MINLEN_ARG(ZSTR_VAL(zkey), ZSTR_LEN(zkey)) && Z_TYPE_P(z_ele) == IS_LONG) {
+                        disque_cmd_append_sstr(&cmdstr, "MINLEN", sizeof("MINLEN") - 1);
+                    } else if (IS_IMPORTRATE_ARG(ZSTR_VAL(zkey), ZSTR_LEN(zkey)) && Z_TYPE_P(z_ele) == IS_LONG) {
+                        disque_cmd_append_sstr(&cmdstr, "IMPORTRATE", sizeof("IMPORTRATE") - 1);
+                    } else {
+                        continue;
+                    }
+                    disque_cmd_append_sstr_int(&cmdstr, zval_get_long(z_ele));
+                }ZEND_HASH_FOREACH_END();
+
+    } else {
+        disque_cmd_init_sstr(&cmdstr, arg_count, kw, strlen(kw));
+    }
+    // Push values out
+    *cmd_len = cmdstr.len;
+    *cmd = cmdstr.c;
+
+    return SUCCESS;
+}
+
+int disque_jscan_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len) {
+    char *key;
+    strlen_t key_len;
+    zval * z_opt = NULL, *z_ele, *z_state;
+    int argc = ZEND_NUM_ARGS();
+    zend_string * zkey;
+    smart_string cmdstr = {0};
+    ulong idx, cursor = 0;
+    HashTable * ht_opt, *ht_state;
+    int arg_count = 0;
+    zend_bool busyloop = IS_FALSE;
+    PHPDISQUE_NOTUSED(idx);
+
+    if (argc > 1) {
+        php_error_docref(0 TSRMLS_CC, E_WARNING, "Must pass either 0 or 1 arguments");
+        return FAILURE;
+    }
+
+    if (zend_parse_parameters(argc TSRMLS_CC, "|z", &z_opt) == FAILURE) {
+        return FAILURE;
+    }
+    if (z_opt && Z_TYPE_P(z_opt) == IS_ARRAY) {
+        ht_opt = Z_ARRVAL_P(z_opt);
+        int opt_counts = zend_hash_num_elements(ht_opt);
+
+
+        if (((z_ele = zend_hash_str_find(ht_opt, "busyloop", sizeof("busyloop") - 1)) != NULL) &&
+            Z_TYPE_P(z_ele) == IS_TRUE) {
+            arg_count++;
+            opt_counts--;
+            busyloop = IS_TRUE;
+            zend_hash_str_del(ht_opt, "busyloop", sizeof("busyloop") - 1);
+        }
+        if (((z_ele = zend_hash_str_find(ht_opt, "cursor", sizeof("cursor") - 1)) != NULL) &&
+            Z_TYPE_P(z_ele) == IS_LONG) {
+            arg_count++;
+            opt_counts--;
+            cursor = Z_LVAL_P(z_ele);
+            zend_hash_str_del(ht_opt, "cursor", sizeof("cursor") - 1);
+        }
+
+        if (((z_ele = zend_hash_str_find(ht_opt, "state", sizeof("state") - 1)) != NULL) &&
+            Z_TYPE_P(z_ele) == IS_ARRAY) {
+            ZVAL_DEREF(z_ele);
+            ht_state = Z_ARRVAL_P(z_ele);
+            arg_count += (zend_hash_num_elements(ht_state) * 2);
+            opt_counts--;
+        }
+
+        arg_count += (opt_counts * 2);
+        /* Build our command header */
+        disque_cmd_init_sstr(&cmdstr, arg_count, kw, strlen(kw));
+        disque_cmd_append_sstr_long(&cmdstr, cursor);
+        if (IS_TRUE == busyloop) {
+            disque_cmd_append_sstr(&cmdstr, "BUSYLOOP", sizeof("BUSYLOOP") - 1);
+        }
+        if (ht_state) {
+            ulong t_idx;
+            zend_string * t_zkey;
+            zval * t_z_ele;
+            ZEND_HASH_FOREACH_KEY_VAL(ht_state, t_idx, t_zkey, t_z_ele)
+                    {
+                        disque_cmd_append_sstr(&cmdstr, "STATE", sizeof("STATE") - 1);
+                        disque_cmd_append_sstr(&cmdstr, Z_STRVAL_P(t_z_ele), Z_STRLEN_P(t_z_ele));
+                    }
+            ZEND_HASH_FOREACH_END();
+        }
+        ZEND_HASH_FOREACH_KEY_VAL(ht_opt, idx, zkey, z_ele)
+                {
+                    /* All options require a string key type */
+                    if (!zkey) continue;
+                    ZVAL_DEREF(z_ele);
+
+                    if (IS_COUNT_ARG(ZSTR_VAL(zkey), ZSTR_LEN(zkey)) && Z_TYPE_P(z_ele) == IS_LONG) {
+                        disque_cmd_append_sstr(&cmdstr, "COUNT", sizeof("COUNT") - 1);
+                        disque_cmd_append_sstr_int(&cmdstr, zval_get_long(z_ele));
+                    } else if (IS_REPLY_ARG(ZSTR_VAL(zkey), ZSTR_LEN(zkey)) && Z_TYPE_P(z_ele) == IS_STRING) {
+                        disque_cmd_append_sstr(&cmdstr, "REPLY", sizeof("REPLY") - 1);
+                        disque_cmd_append_sstr(&cmdstr, Z_STRVAL_P(z_ele), Z_STRLEN_P(z_ele));
+                    } else if (IS_QUEUE_ARG(ZSTR_VAL(zkey), ZSTR_LEN(zkey)) && Z_TYPE_P(z_ele) == IS_STRING) {
+                        disque_cmd_append_sstr(&cmdstr, "QUEUE", sizeof("QUEUE") - 1);
+                        disque_cmd_append_sstr(&cmdstr, Z_STRVAL_P(z_ele), Z_STRLEN_P(z_ele));
+                    } else {
+                        continue;
+                    }
+
+                }ZEND_HASH_FOREACH_END();
+
+    } else {
+        disque_cmd_init_sstr(&cmdstr, arg_count, kw, strlen(kw));
+    }
+    // Push values out
+    *cmd_len = cmdstr.len;
+    *cmd = cmdstr.c;
+
+    return SUCCESS;
+}
+
+PHP_DISQUE_API void disque_info_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
     char *response;
     int response_len;
     zval zv = {{0}}, *z_ret = &zv;
@@ -1452,8 +1643,7 @@ disque_info_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval
     RETVAL_ZVAL(z_ret, 0, 1);
 }
 
-PHP_DISQUE_API void disque_long_response(INTERNAL_FUNCTION_PARAMETERS,
-                                         DisqueSock *disque_sock, zval *z_tab) {
+PHP_DISQUE_API void disque_long_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
 
     char *response;
     int response_len;
@@ -1483,8 +1673,7 @@ PHP_DISQUE_API void disque_long_response(INTERNAL_FUNCTION_PARAMETERS,
     efree(response);
 }
 
-PHP_DISQUE_API void
-disque_multi_job_respone(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
+PHP_DISQUE_API void disque_multi_job_respone(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
 
     disque_mbulk_reply_raw(INTERNAL_FUNCTION_PARAM_PASSTHRU, disque_sock, z_tab);
     zval zv = {{0}}, *z_ret = &zv;
@@ -1501,9 +1690,7 @@ disque_multi_job_respone(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, 
     RETVAL_ZVAL(z_ret, 0, 1);
 }
 
-
-PHP_DISQUE_API int
-disque_mbulk_reply_raw(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
+PHP_DISQUE_API int disque_mbulk_reply_raw(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
     char inbuf[4096];
     int numElems;
     size_t len;
@@ -1538,8 +1725,8 @@ disque_mbulk_reply_raw(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zv
 }
 
 PHP_DISQUE_API void
-disque_mbulk_reply_loop(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock,
-                        zval *z_tab, int count, int unserialize) {
+disque_mbulk_reply_loop(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab, int count,
+                        int unserialize) {
     char *line;
     int i, len;
 
@@ -1711,7 +1898,6 @@ PHP_DISQUE_API void disque_show_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSoc
     RETVAL_ZVAL(z_ret, 0, 1);
 }
 
-
 PHP_DISQUE_API void disque_parse_info_response(char *response, zval *z_ret) {
     char *cur, *pos;
 
@@ -1760,7 +1946,6 @@ PHP_DISQUE_API void disque_parse_info_response(char *response, zval *z_ret) {
     }
 }
 
-
 PHP_DISQUE_API void disque_boolean_response_impl(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab,
                                                  SuccessCallback success_callback) {
 
@@ -1782,6 +1967,7 @@ PHP_DISQUE_API void disque_boolean_response_impl(INTERNAL_FUNCTION_PARAMETERS, D
 PHP_DISQUE_API void disque_boolean_response(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, zval *z_tab) {
     disque_boolean_response_impl(INTERNAL_FUNCTION_PARAM_PASSTHRU, disque_sock, z_tab, NULL);
 }
+
 
 PHP_METHOD (Disque, __construct) {
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "") == FAILURE) {
@@ -1836,7 +2022,6 @@ PHP_METHOD (Disque, info) {
     DISQUE_PROCESS_KW_CMD("INFO", disque_empty_cmd, disque_info_response);
 }
 
-
 PHP_METHOD (Disque, addJob) {
     DISQUE_PROCESS_KW_CMD("ADDJOB", disque_add_job_cmd, disque_ping_response);
 }
@@ -1876,3 +2061,24 @@ PHP_METHOD (Disque, enqueue) {
 PHP_METHOD (Disque, dequeue) {
     DISQUE_PROCESS_KW_CMD("DEQUEUE", disque_ids_cmd, disque_long_response);
 }
+
+PHP_METHOD (Disque, working) {
+    DISQUE_PROCESS_KW_CMD("WORKING", disque_str_cmd, disque_long_response);
+}
+
+PHP_METHOD (Disque, nack) {
+    DISQUE_PROCESS_KW_CMD("NACK", disque_ids_cmd, disque_long_response);
+}
+
+PHP_METHOD (Disque, qstat) {
+    DISQUE_PROCESS_KW_CMD("QSTAT", disque_str_cmd, disque_show_response);
+}
+
+PHP_METHOD (Disque, qscan) {
+    DISQUE_PROCESS_KW_CMD("QSCAN", disque_qscan_cmd, disque_mbulk_reply_raw);
+}
+
+PHP_METHOD (Disque, jscan) {
+    DISQUE_PROCESS_KW_CMD("JSCAN", disque_jscan_cmd, disque_mbulk_reply_raw);
+}
+
