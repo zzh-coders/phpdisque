@@ -14,15 +14,6 @@ try {
 }
 
 $queue_name = 'test';
-var_dump($disque->qscan([
-'count'=>1
-]));
-
-var_dump($disque->jscan([
-'reply'=>'all',
-'state'=>["D-e4f0ed1d-6viyMlsz82hSkgPoKPJVlcsV-05a1","D-e4f0ed1d-ysGyMnxmZt9fn2+IyOcBQXng-05a1"]
-]));
-exit;
 $len = $disque->qlen($queue_name);
 $info = $disque->getJob($queue_name, ['nohang' => true, "count" => $len]);
 
@@ -36,6 +27,13 @@ var_dump('ping_cmd', $disque->ping());
 var_dump('hello_cmd', $disque->hello());
 var_dump('info_cmd', $disque->info());
 var_dump('add_job');
+$i=1;
+while($i<10){
+    $job_id = $disque->addJob($queue_name, json_encode(['t'=>$i]),[]);
+    echo $job_id."\n";
+    $i++;
+}
+exit;
 $job_id = $disque->addJob($queue_name, 'test_job string !!', ['timeout' => 2]);
 if (strlen($job_id) != 40) {
     var_dump('addjob fail');

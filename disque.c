@@ -1273,17 +1273,12 @@ int disque_ids_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *
 int disque_add_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char *kw, char **cmd, int *cmd_len) {
     char *key, *job;
     strlen_t key_len, job_len;
-    zval * z_opt = NULL, *z_ele;
+    zval * z_opt = NULL;
     int argc = ZEND_NUM_ARGS();
-    zend_string * zkey;
     smart_string cmdstr = {0};
-    ulong idx, timeout = 0;
     HashTable * ht_opt;
-    int arg_count = 2;
 
-    int async = IS_FALSE;
-
-    PHPDISQUE_NOTUSED(idx);
+    int arg_count = 2, timeout = 0, async = IS_FALSE;
 
     /* We need either 3 or 5 arguments for this to be valid */
     if (argc != 2 && argc != 3) {
@@ -1291,30 +1286,29 @@ int disque_add_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, ch
         return FAILURE;
     }
 
-    if (zend_parse_parameters(argc TSRMLS_CC, "ss|z", &key, &key_len, &job, &job_len, &z_opt) == FAILURE) {
+    if (zend_parse_parameters(argc TSRMLS_CC, "ss|a", &key, &key_len, &job, &job_len, &z_opt) == FAILURE) {
         return FAILURE;
     }
 
-    if (z_opt && Z_TYPE_P(z_opt) == IS_ARRAY) {
-        ht_opt = Z_ARRVAL_P(z_opt);
-        int opt_counts = zend_hash_num_elements(ht_opt);
-        if (((z_ele = zend_hash_str_find(ht_opt, "timeout", sizeof("timeout") - 1)) != NULL) &&
-            Z_TYPE_P(z_ele) == IS_LONG) {
+    if (z_opt && Z_TYPE_P(z_opt) == IS_ARRAY && (zend_hash_num_elements(Z_ARRVAL_P(z_opt)) > 0)) {
+        HashTable * ht_opt = Z_ARRVAL_P(z_opt);
+        zval * v;
+        int opt_count = zend_hash_num_elements(ht_opt);
+        if (((v = zend_hash_str_find(ht_opt, "timeout", sizeof("timeout") - 1)) != NULL) &&
+            Z_TYPE_P(v) == IS_LONG) {
             arg_count++;
-            opt_counts--;
-            timeout = zval_get_long(z_ele);
-            zend_hash_str_del(ht_opt, "timeout", sizeof("timeout") - 1);
+            opt_count--;
+            timeout = zval_get_long(v);
         }
 
-        if (((z_ele = zend_hash_str_find(ht_opt, "async", sizeof("async") - 1)) != NULL) &&
-            Z_TYPE_P(z_ele) == IS_TRUE) {
+        if (((v = zend_hash_str_find(ht_opt, "async", sizeof("async") - 1)) != NULL) &&
+            Z_TYPE_P(v) == IS_TRUE) {
             arg_count++;
-            opt_counts--;
+            opt_count--;
             async = IS_TRUE;
-            zend_hash_str_del(ht_opt, "async", sizeof("async") - 1);
         }
 
-        arg_count += (opt_counts * 2);
+        arg_count += (opt_count * 2);
         /* Build our command header */
         disque_cmd_init_sstr(&cmdstr, arg_count, kw, strlen(kw));
         disque_cmd_append_sstr(&cmdstr, key, key_len);
@@ -1323,7 +1317,10 @@ int disque_add_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, ch
         if (IS_TRUE == async) {
             disque_cmd_append_sstr(&cmdstr, "ASYNC", sizeof("ASYNC") - 1);
         }
-
+        zend_string * zkey;
+        ulong idx;
+        PHPDISQUE_NOTUSED(idx);
+        zval * z_ele;
         ZEND_HASH_FOREACH_KEY_VAL(ht_opt, idx, zkey, z_ele)
                 {
                     /* All options require a string key type */
@@ -1355,7 +1352,6 @@ int disque_add_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, ch
     // Push values out
     *cmd_len = cmdstr.len;
     *cmd = cmdstr.c;
-
     return SUCCESS;
 }
 
@@ -1383,7 +1379,6 @@ int disque_get_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, ch
     zend_string * zkey;
     smart_string cmdstr = {0};
     ulong idx;
-    HashTable * ht_opt;
     int arg_count = 2;
 
     int nohang = IS_FALSE, withcounters = IS_FALSE;
@@ -1397,28 +1392,27 @@ int disque_get_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, ch
     if (zend_parse_parameters(argc TSRMLS_CC, "s|z", &key, &key_len, &z_opt) == FAILURE) {
         return FAILURE;
     }
-    if (z_opt && Z_TYPE_P(z_opt) == IS_ARRAY) {
-        ht_opt = Z_ARRVAL_P(z_opt);
-        int opt_counts = zend_hash_num_elements(ht_opt);
-
+    if (z_opt && Z_TYPE_P(z_opt) == IS_ARRAY && (zend_hash_num_elements(Z_ARRVAL_P(z_opt)) > 0)) {
+        HashTable * ht_opt = Z_ARRVAL_P(z_opt);
+        int opt_count = zend_hash_num_elements(ht_opt);
         if (((z_ele = zend_hash_str_find(ht_opt, "nohang", sizeof("nohang") - 1)) != NULL) &&
             Z_TYPE_P(z_ele) == IS_TRUE) {
             arg_count++;
-            opt_counts--;
+            opt_count--;
             nohang = IS_TRUE;
-            zend_hash_str_del(ht_opt, "nohang", sizeof("nohang") - 1);
+//            zend_hash_str_del(ht_opt, "nohang", sizeof("nohang") - 1);
         }
 
         if (((z_ele = zend_hash_str_find(ht_opt, "withcounters", sizeof("withcounters") - 1)) != NULL) &&
             Z_TYPE_P(z_ele) == IS_TRUE) {
             arg_count++;
-            opt_counts--;
+            opt_count--;
             withcounters = IS_TRUE;
-            zend_hash_str_del(ht_opt, "withcounters", sizeof("withcounters") - 1);
+//            zend_hash_str_del(ht_opt, "withcounters", sizeof("withcounters") - 1);
         }
 
 
-        arg_count += (opt_counts * 2);
+        arg_count += (opt_count * 2);
         /* Build our command header */
         disque_cmd_init_sstr(&cmdstr, arg_count, kw, strlen(kw));
         if (nohang == IS_TRUE) {
@@ -1462,7 +1456,6 @@ int disque_qscan_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char
     zend_string * zkey;
     smart_string cmdstr = {0};
     ulong idx;
-    HashTable * ht_opt;
     int arg_count = 0;
     zend_bool busyloop = IS_FALSE;
     PHPDISQUE_NOTUSED(idx);
@@ -1475,21 +1468,19 @@ int disque_qscan_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char
     if (zend_parse_parameters(argc TSRMLS_CC, "|z", &z_opt) == FAILURE) {
         return FAILURE;
     }
-    if (z_opt && Z_TYPE_P(z_opt) == IS_ARRAY) {
-        ht_opt = Z_ARRVAL_P(z_opt);
-        int opt_counts = zend_hash_num_elements(ht_opt);
-
-
+    if (z_opt && Z_TYPE_P(z_opt) == IS_ARRAY && (zend_hash_num_elements(Z_ARRVAL_P(z_opt)) > 0)) {
+        HashTable * ht_opt = Z_ARRVAL_P(z_opt);
+        int opt_count = zend_hash_num_elements(ht_opt);
         if (((z_ele = zend_hash_str_find(ht_opt, "busyloop", sizeof("busyloop") - 1)) != NULL) &&
             Z_TYPE_P(z_ele) == IS_TRUE) {
             arg_count++;
-            opt_counts--;
+            opt_count--;
             busyloop = IS_TRUE;
-            zend_hash_str_del(ht_opt, "busyloop", sizeof("busyloop") - 1);
+//            zend_hash_str_del(ht_opt, "busyloop", sizeof("busyloop") - 1);
         }
 
 
-        arg_count += (opt_counts * 2);
+        arg_count += (opt_count * 2);
         /* Build our command header */
         disque_cmd_init_sstr(&cmdstr, arg_count, kw, strlen(kw));
         if (IS_TRUE == busyloop) {
@@ -1533,7 +1524,7 @@ int disque_jscan_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char
     zend_string * zkey;
     smart_string cmdstr = {0};
     ulong idx, cursor = 0;
-    HashTable * ht_opt, *ht_state;
+    HashTable * ht_state;
     int arg_count = 0;
     zend_bool busyloop = IS_FALSE;
     PHPDISQUE_NOTUSED(idx);
@@ -1546,24 +1537,22 @@ int disque_jscan_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char
     if (zend_parse_parameters(argc TSRMLS_CC, "|z", &z_opt) == FAILURE) {
         return FAILURE;
     }
-    if (z_opt && Z_TYPE_P(z_opt) == IS_ARRAY) {
-        ht_opt = Z_ARRVAL_P(z_opt);
-        int opt_counts = zend_hash_num_elements(ht_opt);
-
-
+    if (z_opt && Z_TYPE_P(z_opt) == IS_ARRAY && (zend_hash_num_elements(Z_ARRVAL_P(z_opt)) > 0)) {
+        HashTable * ht_opt = Z_ARRVAL_P(z_opt);
+        int opt_count = zend_hash_num_elements(ht_opt);
         if (((z_ele = zend_hash_str_find(ht_opt, "busyloop", sizeof("busyloop") - 1)) != NULL) &&
             Z_TYPE_P(z_ele) == IS_TRUE) {
             arg_count++;
-            opt_counts--;
+            opt_count--;
             busyloop = IS_TRUE;
-            zend_hash_str_del(ht_opt, "busyloop", sizeof("busyloop") - 1);
+//            zend_hash_str_del(ht_opt, "busyloop", sizeof("busyloop") - 1);
         }
         if (((z_ele = zend_hash_str_find(ht_opt, "cursor", sizeof("cursor") - 1)) != NULL) &&
             Z_TYPE_P(z_ele) == IS_LONG) {
             arg_count++;
-            opt_counts--;
+            opt_count--;
             cursor = Z_LVAL_P(z_ele);
-            zend_hash_str_del(ht_opt, "cursor", sizeof("cursor") - 1);
+//            zend_hash_str_del(ht_opt, "cursor", sizeof("cursor") - 1);
         }
 
         if (((z_ele = zend_hash_str_find(ht_opt, "state", sizeof("state") - 1)) != NULL) &&
@@ -1571,10 +1560,10 @@ int disque_jscan_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, char
             ZVAL_DEREF(z_ele);
             ht_state = Z_ARRVAL_P(z_ele);
             arg_count += (zend_hash_num_elements(ht_state) * 2);
-            opt_counts--;
+            opt_count--;
         }
 
-        arg_count += (opt_counts * 2);
+        arg_count += (opt_count * 2);
         /* Build our command header */
         disque_cmd_init_sstr(&cmdstr, arg_count, kw, strlen(kw));
         disque_cmd_append_sstr_long(&cmdstr, cursor);
