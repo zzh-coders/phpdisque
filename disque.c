@@ -1278,7 +1278,7 @@ int disque_add_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, ch
     smart_string cmdstr = {0};
     HashTable * ht_opt;
 
-    int arg_count = 2, timeout = 0, async = IS_FALSE;
+    int arg_count = 3, timeout = 0, async = IS_FALSE;
 
     /* We need either 3 or 5 arguments for this to be valid */
     if (argc != 2 && argc != 3) {
@@ -1343,10 +1343,10 @@ int disque_add_job_cmd(INTERNAL_FUNCTION_PARAMETERS, DisqueSock *disque_sock, ch
                 }ZEND_HASH_FOREACH_END();
 
     } else {
-        disque_cmd_init_sstr(&cmdstr, 3, kw, strlen(kw));
+        disque_cmd_init_sstr(&cmdstr, arg_count, kw, strlen(kw));
         disque_cmd_append_sstr(&cmdstr, key, key_len);
         disque_cmd_append_sstr(&cmdstr, job, job_len);
-        disque_cmd_append_sstr_int(&cmdstr, 0);
+        disque_cmd_append_sstr_int(&cmdstr, timeout);
     }
 
     // Push values out

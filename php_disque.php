@@ -29,7 +29,7 @@ var_dump('info_cmd', $disque->info());
 var_dump('add_job');
 $i=1;
 while($i<10){
-    $job_id = $disque->addJob($queue_name, json_encode(['t'=>$i]),[]);
+    $job_id = $disque->addJob($queue_name, json_encode(['t'=>$i]), ['delay'=>0]);
     echo $job_id."\n";
     $i++;
 }
