@@ -21,5 +21,5 @@ include_directories(${PHP_SOURCE}/pear)
 include_directories(${PHP_SOURCE})
 
 set(PHP_BIN_SOURCE /usr/local/php7-debug/bin)
-add_custom_target(makefile COMMAND sudo ${PHP_BIN_SOURCE}/phpize &&sudo  ./configure --with-php-config=${PHP_BIN_SOURCE}/php-config && sudo make && sudo make install
+add_custom_target(makefile COMMAND ${PHP_BIN_SOURCE}/phpize &&  ./configure --with-php-config=${PHP_BIN_SOURCE}/php-config &&  make &&  make install
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
